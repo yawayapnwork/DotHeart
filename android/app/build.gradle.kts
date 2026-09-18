@@ -1,3 +1,6 @@
+import java.io.FileInputStream
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -29,6 +32,51 @@ android {
         buildConfig = true
     }
 
+    // ------------------------------------------------------------------
+    // Release signing. Credentials come from EITHER android/keystore.properties
+    // (a local, gitignored file - see android/keystore.properties.example)
+    // OR the four DOTHEART_KEYSTORE_* / DOTHEART_KEY_* environment variables
+    // (for CI), in that order. Exact setup: RELEASE.md.
+    //
+    // Deliberately does NOT hard-fail the Gradle configuration phase if
+    // credentials are absent - a fresh clone with no keystore must still be
+    // able to run assembleDebug, lint, or even assembleRelease for a CI
+    // compile-only check. Instead, releaseSigningReady (below) gates
+    // whether the release buildType actually attaches this signingConfig;
+    // see that buildType's comment for what happens when it's false.
+    // ------------------------------------------------------------------
+    val keystoreProperties = Properties()
+    val keystorePropertiesFile = rootProject.file("keystore.properties")
+    if (keystorePropertiesFile.exists()) {
+        FileInputStream(keystorePropertiesFile).use { keystoreProperties.load(it) }
+    }
+
+    fun resolveSigningValue(propertyKey: String, envVarName: String): String? =
+        keystoreProperties.getProperty(propertyKey)?.takeIf { it.isNotBlank() }
+            ?: System.getenv(envVarName)?.takeIf { it.isNotBlank() }
+
+    val releaseStoreFilePath = resolveSigningValue("storeFile", "DOTHEART_KEYSTORE_PATH")
+    val releaseStorePassword = resolveSigningValue("storePassword", "DOTHEART_KEYSTORE_PASSWORD")
+    val releaseKeyAlias = resolveSigningValue("keyAlias", "DOTHEART_KEY_ALIAS")
+    val releaseKeyPassword = resolveSigningValue("keyPassword", "DOTHEART_KEY_PASSWORD")
+
+    val releaseSigningReady = listOf(
+        releaseStoreFilePath, releaseStorePassword, releaseKeyAlias, releaseKeyPassword
+    ).all { !it.isNullOrBlank() }
+
+    signingConfigs {
+        if (releaseSigningReady) {
+            create("release") {
+                storeFile = file(releaseStoreFilePath!!)
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+                enableV1Signing = true
+                enableV2Signing = true
+            }
+        }
+    }
+
     buildTypes {
         debug {
             applicationIdSuffix = ".debug"
@@ -54,6 +102,23 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            if (releaseSigningReady) {
+                signingConfig = signingConfigs.getByName("release")
+            } else {
+                // No keystore configured: assembleRelease still succeeds
+                // (so CI compile-only checks and a fresh clone aren't
+                // blocked), but the output APK is UNSIGNED. Gradle prints
+                // its own warning about this at build time. Before
+                // distributing an APK, verify it is actually signed - see
+                // RELEASE.md's "verify the signature" step; do not assume
+                // a successful build means a signed, installable-by-
+                // someone-else artifact.
+                project.logger.warn(
+                    "release signingConfig not set: no keystore.properties or " +
+                        "DOTHEART_KEYSTORE_* env vars found. assembleRelease will " +
+                        "produce an UNSIGNED APK. See RELEASE.md."
+                )
+            }
         }
     }
 

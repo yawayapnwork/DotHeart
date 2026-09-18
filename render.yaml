@@ -1,0 +1,40 @@
+# Render Blueprint (Infrastructure as Code) for the DotHeart backend.
+# Deploy with: connect this repo at https://dashboard.render.com/blueprints
+# and Render will read this file automatically - no manual service
+# configuration needed. See RELEASE.md for the full walkthrough, including
+# the manual-UI alternative to this file and the free-tier caveats below.
+
+services:
+  - type: web
+    name: dotheart-backend
+    runtime: docker
+    plan: free
+    region: oregon # pick whichever region is closest to you; changing it later requires recreating the service, not just editing this file
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    envVars:
+      - key: WIDGET_TOKEN
+        sync: false # deliberately NOT set here - see RELEASE.md step 3; never commit a real token to this file
+      - key: DATA_DIR
+        value: /var/data
+      - key: LOG_LEVEL
+        value: INFO
+
+    # -------------------------------------------------------------------
+    # Render's FREE plan does not support a persistent disk add-on. The
+    # DATA_DIR above is ordinary container filesystem: it is wiped on every
+    # deploy and on any instance recycle the free plan's infrastructure
+    # performs. This is a conscious zero-cost tradeoff (see PLAN.md §1.1,
+    # §2 Phase 5) - after any such event, GET /api/v1/widget/current will
+    # 404 until you re-push the current art/note with `scripts/push_art`.
+    #
+    # If you later upgrade to a paid plan with persistent disk support,
+    # uncomment the block below (and DATA_DIR above will then survive
+    # deploys/restarts instead of resetting):
+    #
+    # disk:
+    #   name: dotheart-data
+    #   mountPath: /var/data
+    #   sizeGB: 1
+    # -------------------------------------------------------------------

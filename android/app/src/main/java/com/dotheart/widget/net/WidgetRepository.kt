@@ -108,14 +108,22 @@ class WidgetRepository(private val baseUrl: String) {
     }
 
     /**
-     * Fast in-call retry with exponential backoff (1s, then 2s), layered
-     * *underneath* WorkManager's own between-run BackoffPolicy.EXPONENTIAL
-     * (configured in CoupleWidgetProvider.schedulePeriodicSync). A single
-     * dropped packet or slow DNS lookup self-heals within this doWork()
-     * execution instead of costing an entire extra scheduling cycle; a
-     * sustained outage still exhausts these attempts and surfaces as an
-     * IOException, which the caller maps to a retryable Failed result for
-     * WorkManager's slower, battery-conscious backoff to take over from.
+     * Fast in-call retry with a 1s backoff, layered *underneath*
+     * WorkManager's own between-run BackoffPolicy.EXPONENTIAL (configured
+     * in WidgetSyncScheduler). A single dropped packet or slow DNS lookup
+     * self-heals within this doWork() execution instead of costing an
+     * entire extra scheduling cycle; a sustained outage still exhausts
+     * these attempts and surfaces as an IOException, which the caller maps
+     * to a retryable Failed result for WorkManager's slower,
+     * battery-conscious backoff to take over from.
+     *
+     * Deliberately only 2 attempts, not 3: HttpClientProvider's readTimeout/
+     * callTimeout are already sized (60s/65s) to let a *single* attempt
+     * survive a Render free-tier cold start on its own, so a second attempt
+     * here exists only to catch a genuine transient blip (the container is
+     * warm by then regardless) - not to retry the cold-start wait itself.
+     * At 65s per attempt, 3 attempts would allow a single doWork() call to
+     * run for up to ~3 minutes worst case, which is excessive.
      */
     private suspend fun <T> withRetry(block: () -> T): T {
         var lastError: IOException? = null
@@ -135,7 +143,7 @@ class WidgetRepository(private val baseUrl: String) {
 
     companion object {
         private const val TAG = "WidgetRepository"
-        private const val MAX_INTERNAL_ATTEMPTS = 3
+        private const val MAX_INTERNAL_ATTEMPTS = 2
         private const val INITIAL_BACKOFF_MS = 1000L
         private val RETRYABLE_HTTP_CODES: Set<Int> = (500..599).toSet() + 429
     }
