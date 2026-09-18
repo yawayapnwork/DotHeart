@@ -10,11 +10,12 @@ import java.io.IOException
 
 /**
  * SharedPreferences + internal-storage wrapper holding the widget's last
- * known state: the message/checksum/timestamp triple mirroring the
- * backend's current-state schema, the failure-streak counter driving the
- * "hasn't updated in a while" alert, and a persisted copy of the last
- * successfully rendered bitmap so a fresh process start can render
- * last-known-good pixels before any network attempt.
+ * known state: message/checksum/art-timestamp/ping-timestamps mirroring the
+ * backend's current-state schema, the last observed link (HTTP) status, the
+ * failure-streak counter driving the "hasn't updated in a while" alert, and
+ * a persisted copy of the last successfully rendered bitmap so a fresh
+ * process start can render last-known-good pixels before any network
+ * attempt.
  *
  * Uses context.filesDir (internal storage) for the bitmap cache
  * specifically so no WRITE_EXTERNAL_STORAGE / scoped-storage permission is
@@ -31,13 +32,33 @@ class WidgetStateStore(context: Context) {
 
     fun readMessage(): String? = prefs.getString(KEY_MESSAGE, null)
 
-    fun readTimestamp(): Long = prefs.getLong(KEY_TIMESTAMP, 0L)
+    /** Epoch seconds the art/message was last updated on the backend. */
+    fun readArtUpdatedAt(): Long = prefs.getLong(KEY_ART_UPDATED_AT, 0L)
 
-    fun writeState(message: String, checksum: String, timestamp: Long) {
+    /** Epoch seconds of each user's last recorded ping; 0 if never. */
+    fun readLastPingA(): Long = prefs.getLong(KEY_LAST_PING_A, 0L)
+
+    fun readLastPingB(): Long = prefs.getLong(KEY_LAST_PING_B, 0L)
+
+    /**
+     * Last observed link status: an HTTP status code (200 = healthy), or
+     * LINK_STATUS_UNREACHABLE if the most recent attempt never got a
+     * response at all, or LINK_STATUS_UNKNOWN before any sync has ever
+     * completed (fresh install).
+     */
+    fun readLinkStatus(): Int = prefs.getInt(KEY_LINK_STATUS, LINK_STATUS_UNKNOWN)
+
+    fun writeLinkStatus(statusCode: Int) {
+        prefs.edit().putInt(KEY_LINK_STATUS, statusCode).apply()
+    }
+
+    fun writeState(message: String, checksum: String, artUpdatedAt: Long, lastPingA: Long, lastPingB: Long) {
         prefs.edit()
             .putString(KEY_MESSAGE, message)
             .putString(KEY_CHECKSUM, checksum)
-            .putLong(KEY_TIMESTAMP, timestamp)
+            .putLong(KEY_ART_UPDATED_AT, artUpdatedAt)
+            .putLong(KEY_LAST_PING_A, lastPingA)
+            .putLong(KEY_LAST_PING_B, lastPingB)
             .apply()
     }
 
@@ -87,8 +108,14 @@ class WidgetStateStore(context: Context) {
         private const val CACHE_FILENAME = "widget_cache.png"
         private const val KEY_CHECKSUM = "checksum"
         private const val KEY_MESSAGE = "message"
-        private const val KEY_TIMESTAMP = "timestamp"
+        private const val KEY_ART_UPDATED_AT = "art_updated_at"
+        private const val KEY_LAST_PING_A = "last_ping_a"
+        private const val KEY_LAST_PING_B = "last_ping_b"
+        private const val KEY_LINK_STATUS = "link_status"
         private const val KEY_FAILURE_COUNT = "failure_count"
         private const val KEY_ALERT_SENT = "failure_alert_sent"
+
+        const val LINK_STATUS_UNKNOWN = 0
+        const val LINK_STATUS_UNREACHABLE = -1
     }
 }

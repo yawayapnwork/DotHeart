@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Solid square, no rounded corners, no gradient - the presence-link
+     indicator. Brightness (linked vs. not) is set at render time via
+     RemoteViews.setInt(...,"setImageAlpha",...), not by swapping drawables. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <solid android:color="@color/widget_fg" />
+</shape>

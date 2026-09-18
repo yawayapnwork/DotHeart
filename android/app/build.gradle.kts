@@ -26,6 +26,35 @@ android {
             "DOTHEART_BASE_URL",
             "\"${project.findProperty("dotheartBaseUrl") ?: "https://dotheart.onrender.com"}\""
         )
+
+        // Shared secret for POST /api/v1/widget/ping (must equal the
+        // backend's WIDGET_TOKEN). No default - an empty string here means
+        // WidgetRepository.sendPing() fails fast and locally with a clear
+        // reason rather than sending an unauthenticated request that the
+        // server would reject anyway. Set with:
+        //   ./gradlew assembleDebug -PdotheartPingToken=<the WIDGET_TOKEN value>
+        // This embeds the token in the built APK binary - see the security
+        // note on WidgetRepository's class doc before treating this as
+        // anything more sensitive than a private, two-person toy.
+        buildConfigField(
+            "String",
+            "DOTHEART_PING_TOKEN",
+            "\"${project.findProperty("dotheartPingToken") ?: ""}\""
+        )
+
+        // Which of the two users ("a" or "b") this specific installed build
+        // represents - each partner's device gets its own build with this
+        // baked in, since there is no in-app settings UI to pick it at
+        // runtime. Defaults to "a" so a plain `./gradlew assembleDebug` with
+        // no properties still produces something installable for local
+        // testing; a real two-device setup MUST set this explicitly for at
+        // least one side:
+        //   ./gradlew assembleDebug -PdotheartLocalUserId=b
+        buildConfigField(
+            "String",
+            "DOTHEART_LOCAL_USER_ID",
+            "\"${project.findProperty("dotheartLocalUserId") ?: "a"}\""
+        )
     }
 
     buildFeatures {

@@ -2,10 +2,10 @@
 <resources>
     <string name="app_name">DotHeart</string>
     <string name="widget_label">DotHeart</string>
-    <string name="widget_description">Shows the latest shared pixel art and status note.</string>
-    <string name="widget_default_message">Tap to sync…</string>
-    <string name="widget_image_description">Shared pixel art</string>
-    <string name="widget_error_description">Sync error</string>
-    <string name="notification_stale_title">DotHeart hasn\'t updated in a while</string>
-    <string name="notification_stale_body">Tap the widget to retry, or check the server.</string>
+    <string name="widget_description">Pixel art + sync telemetry readout.</string>
+    <string name="widget_default_status">[SYNC NEVER // LINK ?]</string>
+    <string name="widget_image_description">Synced pixel art payload</string>
+    <string name="widget_link_description">Presence link indicator</string>
+    <string name="notification_stale_title">DOTHEART: LINK STALE</string>
+    <string name="notification_stale_body">no successful sync in %1$d attempts - tap widget to retry</string>
 </resources>

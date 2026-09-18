@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-push_art - frictionless CLI to push a pixel art image and a status note to
-the DotHeart FastAPI backend (POST /api/v1/widget/update).
+push_art - CLI to push a pixel art image and a status note to the DotHeart
+FastAPI backend (POST /api/v1/widget/update).
 
 Usage:
     push_art <path_to_image> [message]
@@ -20,9 +20,10 @@ Required variables:
     DOTHEART_SERVER_URL   e.g. https://dotheart.onrender.com  (no trailing slash needed)
     DOTHEART_TOKEN        must match the backend's WIDGET_TOKEN value exactly
 
-Requires Python 3.9+. Zero external dependencies: standard library only
-(argparse, urllib, http.client via urllib, pathlib, json). No `requests`,
-no `python-dotenv`.
+Output is deliberately terse: [ok]/[warn]/[error] prefixed lines only, no
+narration. Requires Python 3.9+. Zero external dependencies: standard
+library only (argparse, urllib, http.client via urllib, pathlib, json). No
+`requests`, no `python-dotenv`.
 """
 
 from __future__ import annotations
@@ -31,6 +32,7 @@ import argparse
 import io
 import json
 import os
+import struct
 import sys
 import time
 import urllib.error
@@ -57,6 +59,14 @@ _SIGNATURES: dict[bytes, str] = {
 
 def eprint(*args: object, **kwargs: object) -> None:
     print(*args, file=sys.stderr, **kwargs)  # type: ignore[call-overload]
+
+
+def fmt_size(num_bytes: int) -> str:
+    if num_bytes < 1024:
+        return f"{num_bytes}b"
+    if num_bytes < 1024 * 1024:
+        return f"{num_bytes / 1024:.1f}kb"
+    return f"{num_bytes / (1024 * 1024):.1f}mb"
 
 
 # ---------------------------------------------------------------------------
@@ -105,13 +115,8 @@ def load_config() -> tuple[str, str]:
     if not token:
         missing.append("DOTHEART_TOKEN")
     if missing:
-        eprint(f"Error: missing required configuration: {', '.join(missing)}")
-        eprint(
-            "Set them as environment variables, or in ./.env or "
-            "~/.config/dotheart/.env, e.g.:"
-        )
-        eprint("  DOTHEART_SERVER_URL=https://dotheart.onrender.com")
-        eprint("  DOTHEART_TOKEN=your-shared-secret")
+        eprint(f"[error] missing config: {', '.join(missing)}")
+        eprint("[hint] set env vars or ./.env: DOTHEART_SERVER_URL=... DOTHEART_TOKEN=...")
         sys.exit(2)
 
     return server_url, token
@@ -129,33 +134,75 @@ def detect_content_type(data: bytes) -> Optional[str]:
     return None
 
 
+def parse_dimensions(data: bytes, content_type: str) -> Optional[tuple[int, int]]:
+    """Best-effort width/height extraction for the [ok] summary line only -
+    never used for validation (the server doesn't trust client-reported
+    dimensions either, and neither does this). Returns None rather than
+    raising on anything unexpected; a missing dimension is not a push
+    failure.
+    """
+    try:
+        if content_type == "image/png":
+            # 8-byte signature + 4-byte chunk length + 4-byte "IHDR" tag,
+            # then width(4) height(4), all big-endian.
+            width, height = struct.unpack(">II", data[16:24])
+            return width, height
+
+        if content_type == "image/gif":
+            # 6-byte signature ("GIF87a"/"GIF89a"), then width(2) height(2),
+            # both little-endian.
+            width, height = struct.unpack("<HH", data[6:10])
+            return width, height
+
+        if content_type == "image/jpeg":
+            # Scan marker segments for a Start-Of-Frame marker (0xFFC0-0xFFCF,
+            # excluding the DHT/JPG/DAC markers 0xC4/0xC8/0xCC which share
+            # that numeric range but aren't SOF markers). Each SOF segment
+            # is: length(2) precision(1) height(2) width(2), big-endian.
+            pos = 2  # skip the 0xFFD8 SOI marker
+            while pos + 4 <= len(data):
+                if data[pos] != 0xFF:
+                    pos += 1
+                    continue
+                marker = data[pos + 1]
+                if marker in (0xC4, 0xC8, 0xCC):
+                    seg_len = struct.unpack(">H", data[pos + 2 : pos + 4])[0]
+                    pos += 2 + seg_len
+                    continue
+                if 0xC0 <= marker <= 0xCF:
+                    height, width = struct.unpack(">HH", data[pos + 5 : pos + 9])
+                    return width, height
+                if marker in (0xD8, 0x01) or 0xD0 <= marker <= 0xD9:
+                    pos += 2
+                    continue
+                seg_len = struct.unpack(">H", data[pos + 2 : pos + 4])[0]
+                pos += 2 + seg_len
+            return None
+    except (struct.error, IndexError):
+        return None
+    return None
+
+
 def validate_image(path: Path) -> tuple[bytes, str]:
     if not path.exists():
-        eprint(f"Error: file not found: {path}")
+        eprint(f"[error] not found: {path}")
         sys.exit(1)
     if not path.is_file():
-        eprint(f"Error: not a regular file: {path}")
+        eprint(f"[error] not a file: {path}")
         sys.exit(1)
 
     size = path.stat().st_size
     if size == 0:
-        eprint(f"Error: file is empty: {path}")
+        eprint(f"[error] empty file: {path}")
         sys.exit(1)
     if size > MAX_IMAGE_BYTES:
-        eprint(
-            f"Error: {path} is {size:,} bytes, which exceeds the "
-            f"{MAX_IMAGE_BYTES:,} byte limit the server enforces."
-        )
+        eprint(f"[error] oversized: {fmt_size(size)} > {fmt_size(MAX_IMAGE_BYTES)}")
         sys.exit(1)
 
     data = path.read_bytes()
     content_type = detect_content_type(data)
     if content_type is None:
-        eprint(
-            f"Error: {path} does not look like a valid PNG/JPEG/GIF "
-            "(magic-byte check failed - the file extension is never trusted, "
-            "here or on the server)."
-        )
+        eprint(f"[error] bad format: {path} (no png/jpeg/gif signature)")
         sys.exit(1)
 
     return data, content_type
@@ -167,13 +214,10 @@ def sanitize_message(message: str) -> str:
     # authoritative sanitizer, this only catches the common cases early.
     cleaned = "".join(ch for ch in message if ch == " " or ch.isprintable()).strip()
     if not cleaned:
-        eprint("Error: message is empty after removing unprintable characters.")
+        eprint("[error] empty message after sanitize")
         sys.exit(1)
     if len(cleaned) > MAX_MESSAGE_LENGTH:
-        eprint(
-            f"Warning: message is {len(cleaned)} chars; truncating to "
-            f"{MAX_MESSAGE_LENGTH} (the server would truncate it anyway)."
-        )
+        eprint(f"[warn] message truncated to {MAX_MESSAGE_LENGTH} chars")
         cleaned = cleaned[:MAX_MESSAGE_LENGTH]
     return cleaned
 
@@ -215,7 +259,7 @@ def encode_multipart(
 
 
 # ---------------------------------------------------------------------------
-# Upload, with a progress indicator and clear success/error output
+# Upload, with a progress indicator (tty only) and terse result output
 # ---------------------------------------------------------------------------
 
 
@@ -229,7 +273,7 @@ class ProgressReader:
     library behavior to get upload progress without adding a dependency.
     """
 
-    def __init__(self, data: bytes, label: str = "Uploading") -> None:
+    def __init__(self, data: bytes, label: str) -> None:
         self._buf = io.BytesIO(data)
         self._total = len(data)
         self._sent = 0
@@ -248,10 +292,10 @@ class ProgressReader:
         if not sys.stderr.isatty():
             return
         pct = (self._sent / self._total * 100) if self._total else 100.0
-        bar_width = 30
+        bar_width = 24
         filled = int(bar_width * self._sent / self._total) if self._total else bar_width
         bar = "#" * filled + "-" * (bar_width - filled)
-        sys.stderr.write(f"\r{self._label} [{bar}] {pct:5.1f}%")
+        sys.stderr.write(f"\r[{bar}] {pct:5.1f}% {self._label}")
         sys.stderr.flush()
         if self._sent >= self._total:
             sys.stderr.write("\n")
@@ -279,7 +323,7 @@ def upload(
     last_error: Optional[Exception] = None
 
     for attempt in range(1, max_attempts + 1):
-        reader = ProgressReader(body, label=f"Uploading {filename}")
+        reader = ProgressReader(body, label=filename)
         request = urllib.request.Request(url, data=reader, method="POST")
         request.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
         request.add_header("Content-Length", str(len(body)))
@@ -301,20 +345,17 @@ def upload(
                 detail = payload.get("detail", raw.decode("utf-8", errors="replace"))
             except (json.JSONDecodeError, UnicodeDecodeError):
                 detail = raw.decode("utf-8", errors="replace") or str(e.reason)
-            eprint(f"Error: server rejected the upload (HTTP {e.code}): {detail}")
+            eprint(f"[error] http {e.code}: {detail}")
             sys.exit(1)  # A definitive rejection (bad token, bad image) - never retried.
         except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
             last_error = e
             if attempt < max_attempts:
                 delay = 2**attempt
-                eprint(
-                    f"Warning: network error on attempt {attempt}/{max_attempts} "
-                    f"({e}); retrying in {delay}s..."
-                )
+                eprint(f"[warn] retry {attempt}/{max_attempts} in {delay}s: {e}")
                 time.sleep(delay)
             continue
 
-    eprint(f"Error: could not reach {server_url} after {max_attempts} attempts: {last_error}")
+    eprint(f"[error] unreachable after {max_attempts} attempts: {last_error}")
     sys.exit(1)
 
 
@@ -347,10 +388,6 @@ def main(argv: list[str]) -> int:
     raw_message = args.message if args.message is not None else args.image.stem
     message = sanitize_message(raw_message)
 
-    print(f"Server:  {server_url}")
-    print(f"Image:   {args.image} ({len(image_bytes):,} bytes, {content_type})")
-    print(f"Message: {message}")
-
     result = upload(
         server_url=server_url,
         token=token,
@@ -360,17 +397,14 @@ def main(argv: list[str]) -> int:
         filename=args.image.name,
     )
 
-    timestamp = result.get("timestamp")
-    when = (
-        time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(timestamp))
-        if isinstance(timestamp, (int, float))
-        else "unknown"
-    )
-    print("Success!")
-    print(f"  message:   {result.get('message')}")
-    print(f"  image_url: {server_url}{result.get('image_url', '')}")
-    print(f"  checksum:  {result.get('checksum')}")
-    print(f"  pushed at: {when}")
+    dims = parse_dimensions(image_bytes, content_type)
+    dims_str = f"{dims[0]}x{dims[1]} " if dims else ""
+    print(f"[ok] payload {dims_str}synced ({fmt_size(len(image_bytes))})")
+
+    checksum = result.get("checksum", "")
+    timestamp = result.get("timestamp", "")
+    checksum_short = f"{checksum[:16]}.." if len(checksum) > 16 else checksum
+    print(f'[ok] chk={checksum_short} ts={timestamp} note="{result.get("message", "")}"')
     return 0
 
 
@@ -378,5 +412,5 @@ if __name__ == "__main__":
     try:
         sys.exit(main(sys.argv[1:]))
     except KeyboardInterrupt:
-        eprint("\nAborted.")
+        eprint("[error] aborted")
         sys.exit(130)

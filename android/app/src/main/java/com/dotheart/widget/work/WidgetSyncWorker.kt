@@ -1,21 +1,22 @@
 package com.dotheart.widget.work
 
 import android.Manifest
+import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.os.Build
-import android.content.Context
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import androidx.work.CoroutineWorker
-import androidx.work.WorkerParameters
 import androidx.work.ListenableWorker.Result
-import android.util.Log
+import androidx.work.WorkerParameters
 import com.dotheart.widget.BuildConfig
 import com.dotheart.widget.CoupleWidgetProvider
 import com.dotheart.widget.R
 import com.dotheart.widget.net.ImageFetchResult
+import com.dotheart.widget.net.PingResult
 import com.dotheart.widget.net.StateFetchResult
 import com.dotheart.widget.net.WidgetRepository
 import com.dotheart.widget.render.PixelArtRenderer
@@ -43,22 +44,30 @@ class WidgetSyncWorker(
 ) : CoroutineWorker(context, params) {
 
     private val stateStore = WidgetStateStore(applicationContext)
-    private val repository = WidgetRepository(BuildConfig.DOTHEART_BASE_URL)
+    private val repository = WidgetRepository(BuildConfig.DOTHEART_BASE_URL, BuildConfig.DOTHEART_PING_TOKEN)
 
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
         try {
+            maybeSendPing()
+
             val knownChecksum = stateStore.readChecksum()
             when (val stateResult = repository.fetchCurrentState(knownChecksum)) {
                 is StateFetchResult.NotModified -> {
                     Log.i(TAG, "Widget state unchanged (checksum match); skipping render.")
+                    // NotModified only ever originates from a successful
+                    // (2xx, or a literal 304) HTTP response - see
+                    // WidgetRepository.fetchCurrentState - so the link is
+                    // confirmed healthy even though nothing else changed.
+                    stateStore.writeLinkStatus(200)
                     stateStore.resetFailureCount()
+                    CoupleWidgetProvider.refreshAllWidgets(applicationContext)
                     Result.success()
                 }
                 is StateFetchResult.Updated -> {
                     handleUpdatedState(stateResult, knownChecksum)
                 }
                 is StateFetchResult.Failed -> {
-                    handleFailure(stateResult.retryable, stateResult.reason)
+                    handleFailure(stateResult.retryable, stateResult.reason, stateResult.httpCode)
                 }
             }
         } catch (e: CancellationException) {
@@ -72,7 +81,30 @@ class WidgetSyncWorker(
             // other unexpected exception is treated as a retryable failure
             // rather than propagating.
             Log.e(TAG, "Unexpected error during widget sync.", e)
-            handleFailure(retryable = true, reason = e.message ?: "Unexpected error")
+            handleFailure(retryable = true, reason = e.message ?: "Unexpected error", httpCode = null)
+        }
+    }
+
+    /**
+     * Only sends a ping when this execution was enqueued for a user tap
+     * (see WidgetSyncScheduler.enqueueManual/INPUT_KEY_SEND_PING) - the
+     * periodic background poll never pings on its own, since a ping is a
+     * presence signal ("I looked at this just now"), not a sync heartbeat.
+     * Best-effort: a failed/unconfigured ping is logged and otherwise
+     * ignored, never blocking the state fetch that follows - the user
+     * still wants to see the latest art/note even if the ping itself
+     * couldn't be delivered this time.
+     */
+    private suspend fun maybeSendPing() {
+        val shouldPing = inputData.getBoolean(WidgetSyncScheduler.INPUT_KEY_SEND_PING, false)
+        if (!shouldPing) return
+
+        val userId = BuildConfig.DOTHEART_LOCAL_USER_ID
+        when (val result = repository.sendPing(userId)) {
+            is PingResult.Success ->
+                Log.i(TAG, "Ping sent: user_id=$userId timestamp=${result.timestamp}")
+            is PingResult.Failed ->
+                Log.w(TAG, "Ping not delivered (retryable=${result.retryable}): ${result.reason}")
         }
     }
 
@@ -105,7 +137,7 @@ class WidgetSyncWorker(
                 }
                 is ImageFetchResult.Failed -> {
                     if (imageResult.retryable) {
-                        return handleFailure(true, imageResult.reason)
+                        return handleFailure(true, imageResult.reason, httpCode = null)
                     }
                     // Non-retryable image failure: still persist the new
                     // text state below so the note stays fresh even though
@@ -118,16 +150,24 @@ class WidgetSyncWorker(
         if (freshBitmap != null) {
             stateStore.saveBitmapToCache(freshBitmap)
         }
-        stateStore.writeState(state.message, state.checksum, state.timestamp)
+        stateStore.writeState(
+            message = state.message,
+            checksum = state.checksum,
+            artUpdatedAt = state.timestamp,
+            lastPingA = state.lastPingA,
+            lastPingB = state.lastPingB
+        )
+        stateStore.writeLinkStatus(200)
         stateStore.resetFailureCount()
 
-        CoupleWidgetProvider.refreshAllWidgets(applicationContext, showError = false)
+        CoupleWidgetProvider.refreshAllWidgets(applicationContext)
         return Result.success()
     }
 
-    private fun handleFailure(retryable: Boolean, reason: String): Result {
-        Log.w(TAG, "Widget sync failure (retryable=$retryable): $reason")
-        CoupleWidgetProvider.refreshAllWidgets(applicationContext, showError = true)
+    private fun handleFailure(retryable: Boolean, reason: String, httpCode: Int?): Result {
+        Log.w(TAG, "Widget sync failure (retryable=$retryable, httpCode=$httpCode): $reason")
+        stateStore.writeLinkStatus(httpCode ?: WidgetStateStore.LINK_STATUS_UNREACHABLE)
+        CoupleWidgetProvider.refreshAllWidgets(applicationContext)
 
         if (!retryable) {
             return Result.failure()
@@ -163,9 +203,11 @@ class WidgetSyncWorker(
         }
 
         val notification = NotificationCompat.Builder(applicationContext, NotificationChannels.CHANNEL_ALERTS)
-            .setSmallIcon(R.drawable.ic_sync_error_badge)
+            .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle(applicationContext.getString(R.string.notification_stale_title))
-            .setContentText(applicationContext.getString(R.string.notification_stale_body))
+            .setContentText(
+                applicationContext.getString(R.string.notification_stale_body, FAILURE_ALERT_THRESHOLD)
+            )
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setAutoCancel(true)
             .build()

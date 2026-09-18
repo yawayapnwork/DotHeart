@@ -1,7 +1,8 @@
 """DotHeart couple-widget backend.
 
-Two endpoints:
+Endpoints:
   POST /api/v1/widget/update  -- upload a new image + status message
+  POST /api/v1/widget/ping    -- record a user's presence ping
   GET  /api/v1/widget/current -- fetch the latest state as JSON
   GET  /static/{filename}     -- serve the current image bytes
 
@@ -14,8 +15,10 @@ import logging
 import sys
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, status
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.responses import FileResponse, JSONResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from pydantic import BaseModel
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.config import settings
@@ -26,7 +29,7 @@ from app.security import (
     validate_image_bytes,
     verify_token,
 )
-from app.storage import WidgetStorage
+from app.storage import VALID_USER_IDS, WidgetStorage
 
 logging.basicConfig(
     level=settings.log_level,
@@ -36,6 +39,8 @@ logging.basicConfig(
 logger = logging.getLogger("dotheart.api")
 
 storage: WidgetStorage | None = None
+
+_bearer_scheme = HTTPBearer(auto_error=False)
 
 
 @asynccontextmanager
@@ -99,6 +104,21 @@ async def _read_upload_limited(upload: UploadFile, max_bytes: int) -> bytes:
     return b"".join(chunks)
 
 
+def _require_bearer_token(
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
+) -> None:
+    """Shared dependency for header/bearer-authenticated endpoints (distinct
+    from /update's multipart form-field token, which predates this and is
+    left as-is for backward compatibility with the existing CLI).
+    """
+    if credentials is None or not verify_token(credentials.credentials, settings.widget_token):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token.")
+
+
+class PingRequest(BaseModel):
+    user_id: str
+
+
 @app.post("/api/v1/widget/update")
 async def update_widget(
     token: str = Form(...),
@@ -139,9 +159,28 @@ async def update_widget(
         content={
             "message": state.message,
             "image_url": f"/static/{state.image_filename}",
-            "timestamp": state.timestamp,
+            "timestamp": state.last_art_updated_at,
             "checksum": state.checksum,
         },
+    )
+
+
+@app.post("/api/v1/widget/ping", dependencies=[Depends(_require_bearer_token)])
+async def ping_widget(payload: PingRequest) -> JSONResponse:
+    if payload.user_id not in VALID_USER_IDS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"user_id must be one of {VALID_USER_IDS!r}.",
+        )
+
+    assert storage is not None
+    ping_timestamp = storage.record_ping(payload.user_id)
+
+    logger.info("Ping recorded: user_id=%s timestamp=%d", payload.user_id, ping_timestamp)
+
+    return JSONResponse(
+        status_code=status.HTTP_200_OK,
+        content={"user_id": payload.user_id, "timestamp": ping_timestamp},
     )
 
 
@@ -153,13 +192,16 @@ async def get_current_widget() -> JSONResponse:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="No widget state has been uploaded yet."
         )
+    ping = storage.get_ping_state()
     return JSONResponse(
         status_code=status.HTTP_200_OK,
         content={
             "message": state.message,
             "image_url": f"/static/{state.image_filename}",
-            "timestamp": state.timestamp,
+            "timestamp": state.last_art_updated_at,
             "checksum": state.checksum,
+            "last_ping_a": ping.last_ping_a,
+            "last_ping_b": ping.last_ping_b,
         },
     )
 

@@ -3,12 +3,23 @@ package com.dotheart.widget.net
 import android.util.Log
 import java.io.IOException
 import kotlinx.coroutines.delay
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONObject
 
 sealed class StateFetchResult {
     object NotModified : StateFetchResult()
     data class Updated(val state: WidgetState) : StateFetchResult()
-    data class Failed(val retryable: Boolean, val reason: String) : StateFetchResult()
+
+    /**
+     * [httpCode] is the real HTTP status when the server actually responded
+     * (used to drive the widget's "LINK <code>" telemetry), or null when
+     * the failure never got a response at all (DNS/timeout/connection
+     * refused) - callers should treat a null code as "unreachable", not as
+     * "unknown code".
+     */
+    data class Failed(val retryable: Boolean, val reason: String, val httpCode: Int? = null) : StateFetchResult()
 }
 
 sealed class ImageFetchResult {
@@ -17,13 +28,28 @@ sealed class ImageFetchResult {
     data class Failed(val retryable: Boolean, val reason: String) : ImageFetchResult()
 }
 
+sealed class PingResult {
+    data class Success(val timestamp: Long) : PingResult()
+    data class Failed(val retryable: Boolean, val reason: String) : PingResult()
+}
+
 /**
  * Talks to the DotHeart FastAPI backend. Every fetch is ETag/checksum aware
  * (If-None-Match) so an unchanged server state costs one small conditional
  * round trip instead of a full JSON + image re-download - see
  * app/main.py's GET /api/v1/widget/current and GET /static/{filename}.
+ *
+ * [pingToken] authenticates POST /api/v1/widget/ping (Authorization: Bearer)
+ * - it is the same shared secret as the backend's WIDGET_TOKEN, embedded in
+ * this APK at build time via BuildConfig.DOTHEART_PING_TOKEN (see
+ * android/app/build.gradle.kts). This is a deliberate, accepted tradeoff for
+ * a private, sideloaded, two-person app with no server-backed user accounts
+ * and no in-app settings UI to collect a secret at runtime instead: anyone
+ * who decompiles the APK recovers this token. Do not reuse it for anything
+ * more sensitive than "which of two trusted people tapped a home screen
+ * widget."
  */
-class WidgetRepository(private val baseUrl: String) {
+class WidgetRepository(private val baseUrl: String, private val pingToken: String) {
 
     private val client = HttpClientProvider.client
 
@@ -38,11 +64,11 @@ class WidgetRepository(private val baseUrl: String) {
             client.newCall(request).execute().use { response ->
                 when {
                     response.code == 304 -> StateFetchResult.NotModified
-                    response.isSuccessful -> parseStateBody(response.body?.string(), knownChecksum)
+                    response.isSuccessful -> parseStateBody(response.body?.string(), knownChecksum, response.code)
                     response.code in RETRYABLE_HTTP_CODES ->
-                        StateFetchResult.Failed(retryable = true, reason = "HTTP ${response.code}")
+                        StateFetchResult.Failed(retryable = true, reason = "HTTP ${response.code}", httpCode = response.code)
                     else ->
-                        StateFetchResult.Failed(retryable = false, reason = "HTTP ${response.code}")
+                        StateFetchResult.Failed(retryable = false, reason = "HTTP ${response.code}", httpCode = response.code)
                 }
             }
         }
@@ -90,9 +116,53 @@ class WidgetRepository(private val baseUrl: String) {
         ImageFetchResult.Failed(retryable = true, reason = e.message ?: "Network error")
     }
 
-    private fun parseStateBody(body: String?, knownChecksum: String?): StateFetchResult {
+    suspend fun sendPing(userId: String): PingResult {
+        if (pingToken.isBlank()) {
+            return PingResult.Failed(retryable = false, reason = "Ping token not configured.")
+        }
+        return try {
+            withRetry {
+                val jsonBody = JSONObject().put("user_id", userId).toString()
+                val requestBody = jsonBody.toRequestBody("application/json; charset=utf-8".toMediaType())
+                val request = Request.Builder()
+                    .url("$baseUrl/api/v1/widget/ping")
+                    .header("Authorization", "Bearer $pingToken")
+                    .post(requestBody)
+                    .build()
+
+                client.newCall(request).execute().use { response ->
+                    when {
+                        response.isSuccessful -> parsePingBody(response.body?.string())
+                        response.code in RETRYABLE_HTTP_CODES ->
+                            PingResult.Failed(retryable = true, reason = "HTTP ${response.code}")
+                        else ->
+                            PingResult.Failed(retryable = false, reason = "HTTP ${response.code}")
+                    }
+                }
+            }
+        } catch (e: IOException) {
+            Log.w(TAG, "sendPing exhausted retries.", e)
+            PingResult.Failed(retryable = true, reason = e.message ?: "Network error")
+        }
+    }
+
+    private fun parsePingBody(body: String?): PingResult {
+        // The HTTP status already confirmed success server-side; a
+        // malformed/empty body here only costs us the exact echoed
+        // timestamp, not correctness, so this degrades to Success(0)
+        // with a log line rather than treating it as a failure.
+        if (body.isNullOrBlank()) return PingResult.Success(0L)
+        return try {
+            PingResult.Success(JSONObject(body).optLong("timestamp", 0L))
+        } catch (e: Exception) {
+            Log.w(TAG, "Malformed JSON in /ping response.", e)
+            PingResult.Success(0L)
+        }
+    }
+
+    private fun parseStateBody(body: String?, knownChecksum: String?, httpCode: Int): StateFetchResult {
         if (body.isNullOrBlank()) {
-            return StateFetchResult.Failed(retryable = true, reason = "Empty response body.")
+            return StateFetchResult.Failed(retryable = true, reason = "Empty response body.", httpCode = httpCode)
         }
         return try {
             val state = WidgetState.fromJson(body)
@@ -103,7 +173,7 @@ class WidgetRepository(private val baseUrl: String) {
             }
         } catch (e: Exception) {
             Log.w(TAG, "Malformed JSON in /current response.", e)
-            StateFetchResult.Failed(retryable = true, reason = "Malformed response body.")
+            StateFetchResult.Failed(retryable = true, reason = "Malformed response body.", httpCode = httpCode)
         }
     }
 

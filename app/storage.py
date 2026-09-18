@@ -1,9 +1,16 @@
-"""Persistence layer: SQLite for widget state, filesystem for the image.
+"""Persistence layer: SQLite for widget/ping state, filesystem for the image.
 
-A single logical "current state" row is kept in SQLite. Image bytes live on
-disk as a file whose name is derived from its sniffed format. All writes
-(file and DB) are performed so that a concurrent reader never observes a
-half-written file or an inconsistent (filename, checksum) pair.
+Two independent single-row tables:
+  widget_state -- the current art + note (absent until the first push;
+                  GET /api/v1/widget/current 404s until then).
+  ping_state   -- last-ping timestamps for both users, always present from
+                  startup (id=1 row created unconditionally) so /ping works
+                  even before any art has ever been pushed.
+
+Image bytes live on disk as a file whose name is derived from its sniffed
+format. All writes (file and DB) are performed so that a concurrent reader
+never observes a half-written file or an inconsistent (filename, checksum)
+pair.
 """
 from __future__ import annotations
 
@@ -26,9 +33,17 @@ CREATE TABLE IF NOT EXISTS widget_state (
     message TEXT NOT NULL,
     image_filename TEXT NOT NULL,
     checksum TEXT NOT NULL,
-    timestamp INTEGER NOT NULL
+    last_art_updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS ping_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    last_ping_a INTEGER NOT NULL DEFAULT 0,
+    last_ping_b INTEGER NOT NULL DEFAULT 0
 );
 """
+
+VALID_USER_IDS = ("a", "b")
 
 
 @dataclass(frozen=True)
@@ -36,11 +51,17 @@ class WidgetState:
     message: str
     image_filename: str
     checksum: str
-    timestamp: int
+    last_art_updated_at: int
+
+
+@dataclass(frozen=True)
+class PingState:
+    last_ping_a: int
+    last_ping_b: int
 
 
 class WidgetStorage:
-    """Thread-safe façade over the SQLite state row and image file writes.
+    """Thread-safe façade over the SQLite state rows and image file writes.
 
     A single :class:`sqlite3.Connection` is shared across requests (the
     container runs a single uvicorn worker), guarded by a lock since
@@ -55,7 +76,14 @@ class WidgetStorage:
         self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
         self._conn.execute("PRAGMA journal_mode=WAL;")
         with self._conn:
-            self._conn.execute(_SCHEMA)
+            # executescript, not execute: _SCHEMA contains two CREATE TABLE
+            # statements, and sqlite3.Connection.execute() accepts only a
+            # single statement per call.
+            self._conn.executescript(_SCHEMA)
+            self._conn.execute(
+                "INSERT OR IGNORE INTO ping_state (id, last_ping_a, last_ping_b) "
+                "VALUES (1, 0, 0)"
+            )
 
     def close(self) -> None:
         with self._lock:
@@ -64,14 +92,45 @@ class WidgetStorage:
     def get_current_state(self) -> Optional[WidgetState]:
         with self._lock:
             row = self._conn.execute(
-                "SELECT message, image_filename, checksum, timestamp "
+                "SELECT message, image_filename, checksum, last_art_updated_at "
                 "FROM widget_state WHERE id = 1"
             ).fetchone()
         if row is None:
             return None
         return WidgetState(
-            message=row[0], image_filename=row[1], checksum=row[2], timestamp=row[3]
+            message=row[0], image_filename=row[1], checksum=row[2], last_art_updated_at=row[3]
         )
+
+    def get_ping_state(self) -> PingState:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT last_ping_a, last_ping_b FROM ping_state WHERE id = 1"
+            ).fetchone()
+        if row is None:
+            return PingState(last_ping_a=0, last_ping_b=0)
+        return PingState(last_ping_a=row[0], last_ping_b=row[1])
+
+    def record_ping(self, user_id: str) -> int:
+        """Atomically stamps last_ping_<user_id> with the current time and
+        returns that timestamp. Raises ValueError for any user_id other than
+        "a" or "b" -- callers should validate before calling this, but this
+        is the last line of defense against a malformed/unvalidated column
+        name reaching raw SQL.
+        """
+        if user_id not in VALID_USER_IDS:
+            raise ValueError(f"Invalid user_id: {user_id!r}")
+
+        column = "last_ping_a" if user_id == "a" else "last_ping_b"
+        timestamp = int(time.time())
+        with self._lock:
+            with self._conn:
+                # column name is interpolated from the fixed VALID_USER_IDS
+                # check above, never from unvalidated input, so this is not
+                # a SQL-injection path despite the f-string.
+                self._conn.execute(
+                    f"UPDATE ping_state SET {column} = ? WHERE id = 1", (timestamp,)
+                )
+        return timestamp
 
     def save_update(self, message: str, image_bytes: bytes, extension: str) -> WidgetState:
         """Atomically persist a new image + message as the current state.
@@ -95,19 +154,19 @@ class WidgetStorage:
             previous = self.get_current_state()
             self._atomic_write(target_path, image_bytes)
 
-            timestamp = int(time.time())
+            last_art_updated_at = int(time.time())
             with self._conn:
                 self._conn.execute(
                     """
-                    INSERT INTO widget_state (id, message, image_filename, checksum, timestamp)
+                    INSERT INTO widget_state (id, message, image_filename, checksum, last_art_updated_at)
                     VALUES (1, ?, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET
                         message = excluded.message,
                         image_filename = excluded.image_filename,
                         checksum = excluded.checksum,
-                        timestamp = excluded.timestamp
+                        last_art_updated_at = excluded.last_art_updated_at
                     """,
-                    (message, filename, checksum, timestamp),
+                    (message, filename, checksum, last_art_updated_at),
                 )
 
             if previous is not None and previous.image_filename != filename:
@@ -121,7 +180,10 @@ class WidgetStorage:
                     )
 
         return WidgetState(
-            message=message, image_filename=filename, checksum=checksum, timestamp=timestamp
+            message=message,
+            image_filename=filename,
+            checksum=checksum,
+            last_art_updated_at=last_art_updated_at,
         )
 
     def image_path_for(self, filename: str) -> Optional[Path]:

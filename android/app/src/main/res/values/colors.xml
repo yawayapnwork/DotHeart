@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="widget_message_scrim">#B3000000</color>
-    <color name="widget_message_text">#FFFFFFFF</color>
-    <color name="widget_background">#22000000</color>
-    <color name="ic_launcher_background">#FFE3B6C6</color>
+    <color name="widget_bg">#FF000000</color>
+    <color name="widget_fg">#FFFFFFFF</color>
+    <color name="ic_launcher_background">#FF000000</color>
+    <color name="ic_launcher_foreground">#FFFFFFFF</color>
 </resources>

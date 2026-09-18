@@ -10,6 +10,7 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkRequest
+import androidx.work.workDataOf
 import java.util.concurrent.TimeUnit
 
 /**
@@ -66,7 +67,17 @@ object WidgetSyncScheduler {
         WorkManager.getInstance(context).cancelUniqueWork(PERIODIC_WORK_NAME)
     }
 
-    fun enqueueManual(context: Context) {
+    const val INPUT_KEY_SEND_PING = "send_ping"
+
+    /**
+     * [sendPing] distinguishes a user-initiated tap (true - also POSTs a
+     * presence ping for the local user before fetching state, per the
+     * tap-to-refresh contract) from an internal manual re-enqueue that
+     * shouldn't itself count as a ping (false - e.g. WidgetSyncWorker never
+     * re-enqueues itself this way today, but onUpdate's initial placement
+     * sync below does, and that isn't a user tap).
+     */
+    fun enqueueManual(context: Context, sendPing: Boolean) {
         // Deliberately no NetworkType constraint here, unlike schedule()
         // above: a user-initiated manual refresh should attempt immediately
         // and fail fast/bounded (governed by WidgetRepository's own
@@ -74,11 +85,16 @@ object WidgetSyncScheduler {
         // the system's cached network-available signal is stale.
         val request = OneTimeWorkRequestBuilder<WidgetSyncWorker>()
             .addTag(SYNC_WORK_TAG)
+            .setInputData(workDataOf(INPUT_KEY_SEND_PING to sendPing))
             .build()
 
         // REPLACE: if the user taps repeatedly before a prior manual sync
         // finished, only the latest tap's request runs - avoids a backlog
-        // of redundant fetches queuing up behind each other.
+        // of redundant fetches queuing up behind each other. A risk this
+        // accepts: a rapid second tap can replace (and thus lose) a still-
+        // pending first tap's ping before it sends - acceptable for a
+        // presence indicator that only cares about recent activity, not an
+        // exact tap count.
         WorkManager.getInstance(context).enqueueUniqueWork(
             MANUAL_SYNC_WORK_NAME,
             ExistingWorkPolicy.REPLACE,
