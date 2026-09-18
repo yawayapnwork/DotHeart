@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Debug-build-only manifest override, merged automatically by AGP on top of
+  src/main/AndroidManifest.xml for the "debug" build type only (by source
+  set convention - nothing in build.gradle.kts needs to reference this
+  file). Never merged into a release build, so release APKs keep the
+  platform default (targetSdk 28+ defaults usesCleartextTraffic to false,
+  HTTPS-only).
+
+  This permits plain HTTP ONLY to local development hosts (see
+  res/xml/network_security_config_debug.xml in this same source set) so a
+  developer can point DOTHEART_BASE_URL at a local backend (e.g.
+  http://10.0.2.2:8000 for the emulator) without a TLS certificate. The
+  production Render URL is HTTPS and is unaffected by this override either
+  way.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application
+        android:usesCleartextTraffic="true"
+        android:networkSecurityConfig="@xml/network_security_config_debug" />
+</manifest>

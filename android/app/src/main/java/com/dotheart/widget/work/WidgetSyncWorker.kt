@@ -43,7 +43,7 @@ class WidgetSyncWorker(
 ) : CoroutineWorker(context, params) {
 
     private val stateStore = WidgetStateStore(applicationContext)
-    private val repository = WidgetRepository(BuildConfig.BACKEND_BASE_URL)
+    private val repository = WidgetRepository(BuildConfig.DOTHEART_BASE_URL)
 
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
         try {

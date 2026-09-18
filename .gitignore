@@ -6,3 +6,15 @@ data/
 .env
 .env.*
 !.env.example
+
+# Android / Gradle build output and local machine-specific config - never
+# committed. gradle-wrapper.jar itself IS committed (see android/gradle/
+# wrapper/) so a fresh clone can run ./gradlew with no setup step.
+android/.gradle/
+android/app/build/
+android/build/
+android/local.properties
+android/*.iml
+android/.idea/
+android/captures/
+android/.cxx/

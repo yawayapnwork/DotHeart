@@ -15,8 +15,14 @@ android {
         versionName = "1.0.0"
 
         // Overridden per build type below. This default is the production
-        // Render URL; keep it in sync with the deployed backend.
-        buildConfigField("String", "BACKEND_BASE_URL", "\"https://dotheart.onrender.com\"")
+        // Render URL; keep it in sync with the deployed backend. Configurable
+        // per-machine without editing this file via:
+        //   ./gradlew assembleDebug -PdotheartBaseUrl=http://192.168.1.20:8000
+        buildConfigField(
+            "String",
+            "DOTHEART_BASE_URL",
+            "\"${project.findProperty("dotheartBaseUrl") ?: "https://dotheart.onrender.com"}\""
+        )
     }
 
     buildFeatures {
@@ -28,8 +34,18 @@ android {
             applicationIdSuffix = ".debug"
             isMinifyEnabled = false
             // 10.0.2.2 is the emulator's alias for the host machine's
-            // loopback address, for pointing at a locally running backend.
-            buildConfigField("String", "BACKEND_BASE_URL", "\"http://10.0.2.2:8000\"")
+            // loopback address, for pointing at a locally running backend
+            // over plain HTTP - see src/debug/AndroidManifest.xml and
+            // res/xml/network_security_config_debug.xml, which permit
+            // cleartext traffic ONLY to this host, localhost, and 127.0.0.1.
+            // Override per-machine (e.g. a physical device on the same LAN
+            // instead of the emulator loopback alias) with:
+            //   ./gradlew assembleDebug -PdotheartBaseUrl=http://192.168.1.20:8000
+            buildConfigField(
+                "String",
+                "DOTHEART_BASE_URL",
+                "\"${project.findProperty("dotheartBaseUrl") ?: "http://10.0.2.2:8000"}\""
+            )
         }
         release {
             isMinifyEnabled = true
