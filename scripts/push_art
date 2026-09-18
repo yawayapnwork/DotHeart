@@ -1,0 +1,382 @@
+#!/usr/bin/env python3
+"""
+push_art - frictionless CLI to push a pixel art image and a status note to
+the DotHeart FastAPI backend (POST /api/v1/widget/update).
+
+Usage:
+    push_art <path_to_image> [message]
+
+If [message] is omitted, the image's filename stem is used (e.g.
+"sunset.png" -> "sunset") so the tool never blocks on a required argument
+the user forgot.
+
+Configuration (checked in this order; later sources win, so real
+environment variables always take precedence over any .env file):
+    1. ~/.config/dotheart/.env
+    2. ./.env   (current working directory)
+    3. Real process environment variables
+
+Required variables:
+    DOTHEART_SERVER_URL   e.g. https://dotheart.onrender.com  (no trailing slash needed)
+    DOTHEART_TOKEN        must match the backend's WIDGET_TOKEN value exactly
+
+Requires Python 3.9+. Zero external dependencies: standard library only
+(argparse, urllib, http.client via urllib, pathlib, json). No `requests`,
+no `python-dotenv`.
+"""
+
+from __future__ import annotations
+
+import argparse
+import io
+import json
+import os
+import sys
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+from typing import Optional
+
+# ---------------------------------------------------------------------------
+# Constants - mirrored from the backend's app/security.py and app/config.py
+# so obviously-invalid uploads are rejected locally, before any network call.
+# The server remains the authoritative check; these are a fast pre-check.
+# ---------------------------------------------------------------------------
+
+MAX_IMAGE_BYTES = 2 * 1024 * 1024  # matches backend MAX_IMAGE_BYTES default
+MAX_MESSAGE_LENGTH = 140  # matches backend MAX_MESSAGE_LENGTH default
+
+_SIGNATURES: dict[bytes, str] = {
+    b"\x89PNG\r\n\x1a\n": "image/png",
+    b"\xff\xd8\xff": "image/jpeg",
+    b"GIF87a": "image/gif",
+    b"GIF89a": "image/gif",
+}
+
+
+def eprint(*args: object, **kwargs: object) -> None:
+    print(*args, file=sys.stderr, **kwargs)  # type: ignore[call-overload]
+
+
+# ---------------------------------------------------------------------------
+# Configuration loading
+# ---------------------------------------------------------------------------
+
+
+def load_dotenv(path: Path) -> None:
+    """Populate os.environ from a simple KEY=VALUE .env file, without
+    overriding variables that are already set - so real env vars, and
+    whichever .env file was loaded first, always win over a later one."""
+    if not path.is_file():
+        return
+    try:
+        content = path.read_text(encoding="utf-8")
+    except OSError:
+        return
+    for raw_line in content.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        if key:
+            os.environ.setdefault(key, value)
+
+
+def load_config() -> tuple[str, str]:
+    # Home config loaded first, then cwd .env: os.environ.setdefault() means
+    # the first writer for a given key wins, so this order makes a project-
+    # local ./.env override the user's global ~/.config/dotheart/.env, and
+    # a real environment variable (already present before either load) wins
+    # over both.
+    load_dotenv(Path.home() / ".config" / "dotheart" / ".env")
+    load_dotenv(Path.cwd() / ".env")
+
+    server_url = os.environ.get("DOTHEART_SERVER_URL", "").strip().rstrip("/")
+    token = os.environ.get("DOTHEART_TOKEN", "").strip()
+
+    missing = []
+    if not server_url:
+        missing.append("DOTHEART_SERVER_URL")
+    if not token:
+        missing.append("DOTHEART_TOKEN")
+    if missing:
+        eprint(f"Error: missing required configuration: {', '.join(missing)}")
+        eprint(
+            "Set them as environment variables, or in ./.env or "
+            "~/.config/dotheart/.env, e.g.:"
+        )
+        eprint("  DOTHEART_SERVER_URL=https://dotheart.onrender.com")
+        eprint("  DOTHEART_TOKEN=your-shared-secret")
+        sys.exit(2)
+
+    return server_url, token
+
+
+# ---------------------------------------------------------------------------
+# Local validation
+# ---------------------------------------------------------------------------
+
+
+def detect_content_type(data: bytes) -> Optional[str]:
+    for signature, content_type in _SIGNATURES.items():
+        if data.startswith(signature):
+            return content_type
+    return None
+
+
+def validate_image(path: Path) -> tuple[bytes, str]:
+    if not path.exists():
+        eprint(f"Error: file not found: {path}")
+        sys.exit(1)
+    if not path.is_file():
+        eprint(f"Error: not a regular file: {path}")
+        sys.exit(1)
+
+    size = path.stat().st_size
+    if size == 0:
+        eprint(f"Error: file is empty: {path}")
+        sys.exit(1)
+    if size > MAX_IMAGE_BYTES:
+        eprint(
+            f"Error: {path} is {size:,} bytes, which exceeds the "
+            f"{MAX_IMAGE_BYTES:,} byte limit the server enforces."
+        )
+        sys.exit(1)
+
+    data = path.read_bytes()
+    content_type = detect_content_type(data)
+    if content_type is None:
+        eprint(
+            f"Error: {path} does not look like a valid PNG/JPEG/GIF "
+            "(magic-byte check failed - the file extension is never trusted, "
+            "here or on the server)."
+        )
+        sys.exit(1)
+
+    return data, content_type
+
+
+def sanitize_message(message: str) -> str:
+    # A fast local mirror of the server's stricter unicodedata-category
+    # check (app/security.py::sanitize_message); the server is the
+    # authoritative sanitizer, this only catches the common cases early.
+    cleaned = "".join(ch for ch in message if ch == " " or ch.isprintable()).strip()
+    if not cleaned:
+        eprint("Error: message is empty after removing unprintable characters.")
+        sys.exit(1)
+    if len(cleaned) > MAX_MESSAGE_LENGTH:
+        eprint(
+            f"Warning: message is {len(cleaned)} chars; truncating to "
+            f"{MAX_MESSAGE_LENGTH} (the server would truncate it anyway)."
+        )
+        cleaned = cleaned[:MAX_MESSAGE_LENGTH]
+    return cleaned
+
+
+# ---------------------------------------------------------------------------
+# Multipart/form-data encoding (hand-rolled: the stdlib has no multipart
+# writer outside the `email` package's MIME machinery, which is a heavier
+# fit for a one-shot form upload than building the body directly).
+# ---------------------------------------------------------------------------
+
+
+def encode_multipart(
+    fields: dict[str, str],
+    file_field: str,
+    filename: str,
+    file_bytes: bytes,
+    content_type: str,
+) -> tuple[bytes, str]:
+    boundary = f"----dotheart-{os.urandom(8).hex()}"
+    parts: list[bytes] = []
+
+    for name, value in fields.items():
+        parts.append(f"--{boundary}\r\n".encode())
+        parts.append(f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode())
+        parts.append(value.encode("utf-8"))
+        parts.append(b"\r\n")
+
+    parts.append(f"--{boundary}\r\n".encode())
+    parts.append(
+        f'Content-Disposition: form-data; name="{file_field}"; filename="{filename}"\r\n'.encode()
+    )
+    parts.append(f"Content-Type: {content_type}\r\n\r\n".encode())
+    parts.append(file_bytes)
+    parts.append(b"\r\n")
+
+    parts.append(f"--{boundary}--\r\n".encode())
+
+    return b"".join(parts), boundary
+
+
+# ---------------------------------------------------------------------------
+# Upload, with a progress indicator and clear success/error output
+# ---------------------------------------------------------------------------
+
+
+class ProgressReader:
+    """File-like wrapper around an in-memory body that prints a progress bar
+    to stderr as the request body is consumed.
+
+    CPython's http.client.HTTPConnection.send() special-cases any object
+    with a .read() method and streams it out in ~8KB blocks rather than
+    sending it in one call - this class relies on that documented standard-
+    library behavior to get upload progress without adding a dependency.
+    """
+
+    def __init__(self, data: bytes, label: str = "Uploading") -> None:
+        self._buf = io.BytesIO(data)
+        self._total = len(data)
+        self._sent = 0
+        self._label = label
+
+    def __len__(self) -> int:
+        return self._total
+
+    def read(self, size: int = -1) -> bytes:
+        chunk = self._buf.read(size)
+        self._sent += len(chunk)
+        self._render()
+        return chunk
+
+    def _render(self) -> None:
+        if not sys.stderr.isatty():
+            return
+        pct = (self._sent / self._total * 100) if self._total else 100.0
+        bar_width = 30
+        filled = int(bar_width * self._sent / self._total) if self._total else bar_width
+        bar = "#" * filled + "-" * (bar_width - filled)
+        sys.stderr.write(f"\r{self._label} [{bar}] {pct:5.1f}%")
+        sys.stderr.flush()
+        if self._sent >= self._total:
+            sys.stderr.write("\n")
+            sys.stderr.flush()
+
+
+def upload(
+    server_url: str,
+    token: str,
+    message: str,
+    image_bytes: bytes,
+    content_type: str,
+    filename: str,
+    max_attempts: int = 3,
+) -> dict:
+    body, boundary = encode_multipart(
+        fields={"token": token, "message": message},
+        file_field="file",
+        filename=filename,
+        file_bytes=image_bytes,
+        content_type=content_type,
+    )
+
+    url = f"{server_url}/api/v1/widget/update"
+    last_error: Optional[Exception] = None
+
+    for attempt in range(1, max_attempts + 1):
+        reader = ProgressReader(body, label=f"Uploading {filename}")
+        request = urllib.request.Request(url, data=reader, method="POST")
+        request.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
+        request.add_header("Content-Length", str(len(body)))
+        request.add_header("Accept", "application/json")
+
+        try:
+            # 60s timeout: the backend runs on Render's free tier, which
+            # spins the container down after ~15 minutes idle - the first
+            # request after a long gap can take 30-50s to serve while it
+            # cold-starts, and a shorter timeout would misreport that as a
+            # failure.
+            with urllib.request.urlopen(request, timeout=60) as response:
+                raw = response.read()
+                return json.loads(raw.decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            raw = e.read()
+            try:
+                payload = json.loads(raw.decode("utf-8"))
+                detail = payload.get("detail", raw.decode("utf-8", errors="replace"))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                detail = raw.decode("utf-8", errors="replace") or str(e.reason)
+            eprint(f"Error: server rejected the upload (HTTP {e.code}): {detail}")
+            sys.exit(1)  # A definitive rejection (bad token, bad image) - never retried.
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+            last_error = e
+            if attempt < max_attempts:
+                delay = 2**attempt
+                eprint(
+                    f"Warning: network error on attempt {attempt}/{max_attempts} "
+                    f"({e}); retrying in {delay}s..."
+                )
+                time.sleep(delay)
+            continue
+
+    eprint(f"Error: could not reach {server_url} after {max_attempts} attempts: {last_error}")
+    sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="push_art",
+        description="Push a pixel art image and status note to the DotHeart backend.",
+    )
+    parser.add_argument("image", type=Path, help="path to a PNG/JPEG/GIF file")
+    parser.add_argument(
+        "message",
+        nargs="?",
+        default=None,
+        help="status note, max 140 chars (default: the image filename, without extension)",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str]) -> int:
+    args = parse_args(argv)
+
+    server_url, token = load_config()
+    image_bytes, content_type = validate_image(args.image)
+
+    raw_message = args.message if args.message is not None else args.image.stem
+    message = sanitize_message(raw_message)
+
+    print(f"Server:  {server_url}")
+    print(f"Image:   {args.image} ({len(image_bytes):,} bytes, {content_type})")
+    print(f"Message: {message}")
+
+    result = upload(
+        server_url=server_url,
+        token=token,
+        message=message,
+        image_bytes=image_bytes,
+        content_type=content_type,
+        filename=args.image.name,
+    )
+
+    timestamp = result.get("timestamp")
+    when = (
+        time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(timestamp))
+        if isinstance(timestamp, (int, float))
+        else "unknown"
+    )
+    print("Success!")
+    print(f"  message:   {result.get('message')}")
+    print(f"  image_url: {server_url}{result.get('image_url', '')}")
+    print(f"  checksum:  {result.get('checksum')}")
+    print(f"  pushed at: {when}")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except KeyboardInterrupt:
+        eprint("\nAborted.")
+        sys.exit(130)
