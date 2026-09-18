@@ -728,43 +728,80 @@ DotHeart/
 │
 ├── render.yaml                       PLANNED (PLAN.md Phase 5) — Render Docker service IaC config
 │
-└── android/                          Native Android client — PLANNED (PLAN.md Phase 2-3)
+└── android/                          Native Android client — IMPLEMENTED
+    ├── settings.gradle.kts             Module include, plugin/dependency repositories
+    ├── build.gradle.kts                Root: AGP 8.5.2 + Kotlin 1.9.24 plugin versions
+    ├── gradle.properties               AndroidX, non-transitive R class
     └── app/
+        ├── build.gradle.kts            namespace com.dotheart.widget, minSdk 26 / targetSdk 34,
+        │                                 BACKEND_BASE_URL BuildConfig field (per build type),
+        │                                 R8 full mode + shrinkResources on release
+        ├── proguard-rules.pro          OkHttp/coroutines R8 warning suppressions
         └── src/main/
-            ├── AndroidManifest.xml                  Declares `DotHeartWidgetProvider`,
-            │                                         `ACTION_DOTHEART_REFRESH` intent filter,
-            │                                         no WRITE_EXTERNAL_STORAGE permission
+            ├── AndroidManifest.xml                  Declares `CoupleWidgetProvider`
+            │                                         (`android:exported="true"`),
+            │                                         `ACTION_MANUAL_REFRESH` intent filter,
+            │                                         INTERNET / ACCESS_NETWORK_STATE /
+            │                                         POST_NOTIFICATIONS permissions only —
+            │                                         no WRITE_EXTERNAL_STORAGE
             ├── java/com/dotheart/widget/
-            │   ├── DotHeartWidgetProvider.kt          `AppWidgetProvider`: onUpdate, onReceive
-            │   │                                       (manual tap), onEnabled/onDisabled
-            │   │                                       (WorkManager schedule/cancel),
-            │   │                                       onAppWidgetOptionsChanged (resize re-render)
+            │   ├── CoupleWidgetProvider.kt            `AppWidgetProvider`: onUpdate, onReceive
+            │   │                                       (manual tap → ACTION_MANUAL_REFRESH),
+            │   │                                       onEnabled/onDisabled (WorkManager
+            │   │                                       schedule/cancel), onAppWidgetOptionsChanged
+            │   │                                       (resize re-render), shared `render()` /
+            │   │                                       `refreshAllWidgets()` used by the worker too
             │   ├── work/
-            │   │   └── WidgetRefreshWorker.kt          `CoroutineWorker`: Stages 3-6 fetch/decode/
-            │   │                                       scale/render pipeline; shared by periodic
-            │   │                                       and manual-tap one-off requests
+            │   │   └── WidgetSyncWorker.kt             `CoroutineWorker`: Stages 3-6 fetch/decode/
+            │   │                                       scale/render pipeline; shared by the periodic
+            │   │                                       job and the manual-tap one-off request;
+            │   │                                       posts the 5-consecutive-failure alert
             │   ├── net/
-            │   │   ├── DotHeartApiClient.kt            Thin OkHttp wrapper: `getCurrentState()`,
-            │   │   │                                   `getStaticImage()`, both ETag-aware
-            │   │   └── HttpClientProvider.kt            Singleton `OkHttpClient` (shared connection
-            │   │                                       pool, configured timeouts)
+            │   │   ├── WidgetState.kt                  Data class + `org.json`-based parsing of the
+            │   │   │                                   `/api/v1/widget/current` response schema
+            │   │   ├── WidgetRepository.kt              ETag-aware `fetchCurrentState`/`fetchImage`,
+            │   │   │                                   sealed `StateFetchResult`/`ImageFetchResult`,
+            │   │   │                                   in-call exponential-backoff retry (1s, 2s)
+            │   │   └── HttpClientProvider.kt            Singleton `OkHttpClient` (15s connect/read/
+            │   │                                       write, 20s call timeout, shared connection pool)
             │   ├── render/
-            │   │   └── NearestNeighborScaler.kt         `filter = false` scale + IPC-budget clamp
-            │   └── state/
-            │       └── WidgetStateStore.kt              `SharedPreferences` wrapper: checksum,
-            │                                             message, failure counter; disk bitmap
-            │                                             cache read/write (`context.filesDir`)
+            │   │   └── PixelArtRenderer.kt              `Paint.isFilterBitmap = false` nearest-neighbor
+            │   │                                       scale; 240px/side + 250KB output hard clamps
+            │   ├── state/
+            │   │   └── WidgetStateStore.kt              `SharedPreferences` wrapper: checksum,
+            │   │                                         message, failure counter/alert-sent flag;
+            │   │                                         disk bitmap cache read/write (`filesDir`)
+            │   └── util/
+            │       └── NotificationChannels.kt          Idempotent `IMPORTANCE_LOW` alert channel
             └── res/
-                ├── layout/widget_dotheart.xml           ImageView + TextView + error-badge overlay
-                ├── xml/dotheart_widget_info.xml          `updatePeriodMillis="0"`, min/target sizes
-                └── drawable/                              placeholder heart, sync-error badge, spinner
+                ├── layout/widget_couple.xml             FrameLayout root (click target) + ImageView +
+                │                                         autosize-text TextView + refresh ProgressBar +
+                │                                         error-badge ImageView, all RemoteViews-safe
+                ├── xml/couple_widget_info.xml            `updatePeriodMillis="0"`, min/target/max-resize
+                │                                         sizes, `home_screen` category
+                ├── drawable/                              placeholder heart, sync-error badge,
+                │                                         rounded semi-transparent background,
+                │                                         adaptive-icon foreground vector
+                ├── mipmap-anydpi-v26/ic_launcher.xml     Adaptive icon (no legacy fallback needed —
+                │                                         minSdk 26 is the adaptive-icon floor)
+                └── values/                                strings.xml, colors.xml
 ```
 
-**Legend**: entries under `app/` and root-level backend config are
-implemented and match this document's Stage 2 description exactly (file
-and function names are real, not illustrative). Entries under `cli/`,
-`docs/`, `render.yaml`, and `android/` describe the target structure per
-`PLAN.md`'s Phase 2–5 breakdown and are the authoritative naming
+**Legend**: entries under `app/` (Python backend) and `android/` are
+implemented and match this document's Stage descriptions exactly (file,
+class, and function names are real, not illustrative). Entries under
+`cli/`, `docs/`, and `render.yaml` describe the target structure per
+`PLAN.md`'s Phase 4–5 breakdown and are the authoritative naming
 convention to follow when those phases are implemented — this file should
-be updated to drop the "PLANNED" markers as each part lands, keeping it a
-living, accurate map rather than a stale aspirational one.
+be updated to drop remaining "PLANNED" markers as each part lands, keeping
+it a living, accurate map rather than a stale aspirational one.
+
+**Note on class naming**: this section originally sketched the Android
+client as `DotHeartWidgetProvider` / `WidgetRefreshWorker` /
+`DotHeartApiClient` / `NearestNeighborScaler`. The actual implementation
+uses `CoupleWidgetProvider` / `WidgetSyncWorker` / `WidgetRepository` /
+`PixelArtRenderer` instead — functionally identical to what Stages 3–6
+above describe, just renamed during implementation. The Stage-by-Stage
+prose above still describes the correct *mechanics*; treat the class names
+in this directory map, not the earlier prose, as authoritative for exact
+symbol names.

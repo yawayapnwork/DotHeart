@@ -815,3 +815,14 @@ automated tests where marked `[auto]`.
 | `render.yaml` | 5 | Not yet created — Phase 5 deliverable |
 | `docs/BATTERY_SETUP.md` | 5 | Not yet created — Phase 5 deliverable |
 | `docs/ART_EXPORT_GUIDE.md` | 4 | Not yet created — Phase 4 deliverable |
+
+**Naming note**: Phase 2's prose above (and the code snippets it contains)
+sketches Android class names — `DotHeartWidgetProvider`,
+`WidgetRefreshWorker`, `NearestNeighborScaler` — from before implementation.
+The Android module has since been built under `android/` with equivalent
+classes named `CoupleWidgetProvider`, `WidgetSyncWorker`, and
+`PixelArtRenderer` respectively (same responsibilities, same mechanics
+described here). `WORKFLOW.md`'s directory map is the authoritative,
+kept-current file/symbol listing for the Android client; treat this
+document's Phase 2/3 prose as the design rationale, not the symbol source
+of truth.

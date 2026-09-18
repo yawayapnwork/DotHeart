@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- Used only for the "hasn't synced in a while" alert (WidgetSyncWorker).
+         Required at runtime on API 33+; this app is sideloaded (not
+         Play-distributed, see PLAN.md) and has no Activity to host an
+         in-app runtime permission request, so grant it once after install:
+         adb shell pm grant com.dotheart.widget android.permission.POST_NOTIFICATIONS
+         Absence of the grant is handled gracefully (the alert is skipped,
+         never a crash) - see WidgetSyncWorker.postFailureAlert(). -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <application
+        android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher"
+        android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+
+        <receiver
+            android:name=".CoupleWidgetProvider"
+            android:exported="true"
+            android:label="@string/widget_label">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+                <action android:name="com.dotheart.widget.ACTION_MANUAL_REFRESH" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/couple_widget_info" />
+        </receiver>
+
+    </application>
+
+</manifest>
