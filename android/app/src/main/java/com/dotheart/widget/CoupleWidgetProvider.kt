@@ -184,9 +184,11 @@ class CoupleWidgetProvider : AppWidgetProvider() {
 
         /**
          * Builds the single-line monospace telemetry readout, e.g.:
-         *   \[SYNC 14M AGO // LINK 200\] > out for milk
+         *   PEER 84% [CHRG] // SYNC 14m AGO // LINK 200 > out for milk
+         *   PEER 42% [BAT] // SYNC 2m AGO // LINK 200 > out for milk
+         *   PEER --% [---] // SYNC NEVER // LINK ? (peer battery not yet reported)
          * or, mid-tap:
-         *   \[SYNCING...\] > out for milk
+         *   [SYNCING...] > out for milk
          */
         private fun buildStatusLine(store: WidgetStateStore, showSyncing: Boolean): String {
             val header = if (showSyncing) {
@@ -199,7 +201,7 @@ class CoupleWidgetProvider : AppWidgetProvider() {
                     WidgetStateStore.LINK_STATUS_UNREACHABLE -> "ERR"
                     else -> status.toString()
                 }
-                "[SYNC $ago // LINK $link]"
+                "PEER ${peerPowerReadout(store)} // SYNC $ago // LINK $link"
             }
 
             val message = store.readMessage()
@@ -208,6 +210,12 @@ class CoupleWidgetProvider : AppWidgetProvider() {
             } else {
                 header
             }
+        }
+
+        private fun peerPowerReadout(store: WidgetStateStore): String {
+            val level = store.readPeerBatteryLevel()
+            if (level < 0) return "--% [---]"
+            return "$level% ${if (store.readPeerIsCharging()) "[CHRG]" else "[BAT]"}"
         }
 
         /** Dimmed-but-not-invisible alpha for an out-of-window link indicator - a deliberate "present but not lit" state, not a hidden view. */

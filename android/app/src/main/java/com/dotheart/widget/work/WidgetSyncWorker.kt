@@ -21,6 +21,7 @@ import com.dotheart.widget.net.StateFetchResult
 import com.dotheart.widget.net.WidgetRepository
 import com.dotheart.widget.render.PixelArtRenderer
 import com.dotheart.widget.state.WidgetStateStore
+import com.dotheart.widget.util.BatteryReader
 import com.dotheart.widget.util.NotificationChannels
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -51,7 +52,7 @@ class WidgetSyncWorker(
             maybeSendPing()
 
             val knownChecksum = stateStore.readChecksum()
-            when (val stateResult = repository.fetchCurrentState(knownChecksum)) {
+            when (val stateResult = repository.fetchCurrentState(knownChecksum, BuildConfig.DOTHEART_LOCAL_USER_ID)) {
                 is StateFetchResult.NotModified -> {
                     Log.i(TAG, "Widget state unchanged (checksum match); skipping render.")
                     // NotModified only ever originates from a successful
@@ -100,7 +101,7 @@ class WidgetSyncWorker(
         if (!shouldPing) return
 
         val userId = BuildConfig.DOTHEART_LOCAL_USER_ID
-        when (val result = repository.sendPing(userId)) {
+        when (val result = repository.sendPing(userId, BatteryReader.read(applicationContext))) {
             is PingResult.Success ->
                 Log.i(TAG, "Ping sent: user_id=$userId timestamp=${result.timestamp}")
             is PingResult.Failed ->
@@ -155,7 +156,9 @@ class WidgetSyncWorker(
             checksum = state.checksum,
             artUpdatedAt = state.timestamp,
             lastPingA = state.lastPingA,
-            lastPingB = state.lastPingB
+            lastPingB = state.lastPingB,
+            peerBatteryLevel = state.peerBatteryLevel,
+            peerIsCharging = state.peerIsCharging
         )
         stateStore.writeLinkStatus(200)
         stateStore.resetFailureCount()

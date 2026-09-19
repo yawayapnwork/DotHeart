@@ -39,9 +39,23 @@ CREATE TABLE IF NOT EXISTS widget_state (
 CREATE TABLE IF NOT EXISTS ping_state (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     last_ping_a INTEGER NOT NULL DEFAULT 0,
-    last_ping_b INTEGER NOT NULL DEFAULT 0
+    last_ping_b INTEGER NOT NULL DEFAULT 0,
+    battery_level_a INTEGER NOT NULL DEFAULT -1,
+    is_charging_a INTEGER NOT NULL DEFAULT 0,
+    battery_level_b INTEGER NOT NULL DEFAULT -1,
+    is_charging_b INTEGER NOT NULL DEFAULT 0
 );
 """
+
+# Columns added after the first release; applied to pre-existing databases
+# by WidgetStorage._migrate_ping_state (CREATE TABLE IF NOT EXISTS above is a
+# no-op for a table that already exists). battery_level -1 == "never reported".
+_PING_STATE_MIGRATION_COLUMNS = (
+    ("battery_level_a", "INTEGER NOT NULL DEFAULT -1"),
+    ("is_charging_a", "INTEGER NOT NULL DEFAULT 0"),
+    ("battery_level_b", "INTEGER NOT NULL DEFAULT -1"),
+    ("is_charging_b", "INTEGER NOT NULL DEFAULT 0"),
+)
 
 VALID_USER_IDS = ("a", "b")
 
@@ -58,6 +72,23 @@ class WidgetState:
 class PingState:
     last_ping_a: int
     last_ping_b: int
+    battery_level_a: int = -1
+    is_charging_a: bool = False
+    battery_level_b: int = -1
+    is_charging_b: bool = False
+
+    def battery_for(self, user_id: str) -> tuple[Optional[int], Optional[bool]]:
+        """(level, is_charging) for one user, or (None, None) if that user has
+        never reported a battery reading."""
+        if user_id == "a":
+            level, charging = self.battery_level_a, self.is_charging_a
+        elif user_id == "b":
+            level, charging = self.battery_level_b, self.is_charging_b
+        else:
+            raise ValueError(f"Invalid user_id: {user_id!r}")
+        if level < 0:
+            return None, None
+        return level, charging
 
 
 class WidgetStorage:
@@ -80,10 +111,17 @@ class WidgetStorage:
             # statements, and sqlite3.Connection.execute() accepts only a
             # single statement per call.
             self._conn.executescript(_SCHEMA)
+            self._migrate_ping_state()
             self._conn.execute(
                 "INSERT OR IGNORE INTO ping_state (id, last_ping_a, last_ping_b) "
                 "VALUES (1, 0, 0)"
             )
+
+    def _migrate_ping_state(self) -> None:
+        existing = {row[1] for row in self._conn.execute("PRAGMA table_info(ping_state)")}
+        for name, ddl in _PING_STATE_MIGRATION_COLUMNS:
+            if name not in existing:
+                self._conn.execute(f"ALTER TABLE ping_state ADD COLUMN {name} {ddl}")
 
     def close(self) -> None:
         with self._lock:
@@ -104,32 +142,60 @@ class WidgetStorage:
     def get_ping_state(self) -> PingState:
         with self._lock:
             row = self._conn.execute(
-                "SELECT last_ping_a, last_ping_b FROM ping_state WHERE id = 1"
+                "SELECT last_ping_a, last_ping_b, battery_level_a, is_charging_a, "
+                "battery_level_b, is_charging_b FROM ping_state WHERE id = 1"
             ).fetchone()
         if row is None:
             return PingState(last_ping_a=0, last_ping_b=0)
-        return PingState(last_ping_a=row[0], last_ping_b=row[1])
+        return PingState(
+            last_ping_a=row[0],
+            last_ping_b=row[1],
+            battery_level_a=row[2],
+            is_charging_a=bool(row[3]),
+            battery_level_b=row[4],
+            is_charging_b=bool(row[5]),
+        )
 
-    def record_ping(self, user_id: str) -> int:
+    def record_ping(
+        self,
+        user_id: str,
+        battery_level: Optional[int] = None,
+        is_charging: Optional[bool] = None,
+    ) -> int:
         """Atomically stamps last_ping_<user_id> with the current time and
-        returns that timestamp. Raises ValueError for any user_id other than
-        "a" or "b" -- callers should validate before calling this, but this
-        is the last line of defense against a malformed/unvalidated column
-        name reaching raw SQL.
+        returns that timestamp. If both battery_level (0-100) and is_charging
+        are given, they are persisted in the same UPDATE, so a reader never
+        sees a new ping time paired with a stale battery reading. A partial
+        reading (only one of the two) is ignored rather than half-applied.
+
+        Raises ValueError for any user_id other than "a" or "b" or an
+        out-of-range battery_level -- callers should validate before calling
+        this, but this is the last line of defense against a malformed/
+        unvalidated column name reaching raw SQL.
         """
         if user_id not in VALID_USER_IDS:
             raise ValueError(f"Invalid user_id: {user_id!r}")
+        if battery_level is not None and not 0 <= battery_level <= 100:
+            raise ValueError(f"Invalid battery_level: {battery_level!r}")
 
-        column = "last_ping_a" if user_id == "a" else "last_ping_b"
+        suffix = user_id  # "a" or "b", validated above
         timestamp = int(time.time())
         with self._lock:
             with self._conn:
-                # column name is interpolated from the fixed VALID_USER_IDS
+                # column names are interpolated from the fixed VALID_USER_IDS
                 # check above, never from unvalidated input, so this is not
-                # a SQL-injection path despite the f-string.
-                self._conn.execute(
-                    f"UPDATE ping_state SET {column} = ? WHERE id = 1", (timestamp,)
-                )
+                # a SQL-injection path despite the f-strings.
+                if battery_level is not None and is_charging is not None:
+                    self._conn.execute(
+                        f"UPDATE ping_state SET last_ping_{suffix} = ?, "
+                        f"battery_level_{suffix} = ?, is_charging_{suffix} = ? WHERE id = 1",
+                        (timestamp, battery_level, 1 if is_charging else 0),
+                    )
+                else:
+                    self._conn.execute(
+                        f"UPDATE ping_state SET last_ping_{suffix} = ? WHERE id = 1",
+                        (timestamp,),
+                    )
         return timestamp
 
     def save_update(self, message: str, image_bytes: bytes, extension: str) -> WidgetState:

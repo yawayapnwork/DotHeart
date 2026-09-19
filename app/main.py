@@ -15,10 +15,10 @@ import logging
 import sys
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile, status
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.config import settings
@@ -117,6 +117,9 @@ def _require_bearer_token(
 
 class PingRequest(BaseModel):
     user_id: str
+    # Optional device power telemetry; both must be present to be stored.
+    battery_level: int | None = Field(default=None, ge=0, le=100)
+    is_charging: bool | None = None
 
 
 @app.post("/api/v1/widget/update")
@@ -174,7 +177,11 @@ async def ping_widget(payload: PingRequest) -> JSONResponse:
         )
 
     assert storage is not None
-    ping_timestamp = storage.record_ping(payload.user_id)
+    ping_timestamp = storage.record_ping(
+        payload.user_id,
+        battery_level=payload.battery_level,
+        is_charging=payload.is_charging,
+    )
 
     logger.info("Ping recorded: user_id=%s timestamp=%d", payload.user_id, ping_timestamp)
 
@@ -185,7 +192,15 @@ async def ping_widget(payload: PingRequest) -> JSONResponse:
 
 
 @app.get("/api/v1/widget/current")
-async def get_current_widget() -> JSONResponse:
+async def get_current_widget(user_id: str | None = Query(default=None)) -> JSONResponse:
+    """`user_id` ("a"/"b") identifies the requester so the peer's battery
+    state can be returned; without it peer_* fields are null.
+    """
+    if user_id is not None and user_id not in VALID_USER_IDS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"user_id must be one of {VALID_USER_IDS!r}.",
+        )
     assert storage is not None
     state = storage.get_current_state()
     if state is None:
@@ -193,6 +208,10 @@ async def get_current_widget() -> JSONResponse:
             status_code=status.HTTP_404_NOT_FOUND, detail="No widget state has been uploaded yet."
         )
     ping = storage.get_ping_state()
+    peer_level: int | None = None
+    peer_charging: bool | None = None
+    if user_id is not None:
+        peer_level, peer_charging = ping.battery_for("b" if user_id == "a" else "a")
     return JSONResponse(
         status_code=status.HTTP_200_OK,
         content={
@@ -202,6 +221,8 @@ async def get_current_widget() -> JSONResponse:
             "checksum": state.checksum,
             "last_ping_a": ping.last_ping_a,
             "last_ping_b": ping.last_ping_b,
+            "peer_battery_level": peer_level,
+            "peer_is_charging": peer_charging,
         },
     )
 

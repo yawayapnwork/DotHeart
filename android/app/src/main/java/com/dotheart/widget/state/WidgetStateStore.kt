@@ -52,13 +52,28 @@ class WidgetStateStore(context: Context) {
         prefs.edit().putInt(KEY_LINK_STATUS, statusCode).apply()
     }
 
-    fun writeState(message: String, checksum: String, artUpdatedAt: Long, lastPingA: Long, lastPingB: Long) {
+    /** Peer's last reported battery percent, or -1 if unknown. */
+    fun readPeerBatteryLevel(): Int = prefs.getInt(KEY_PEER_BATTERY_LEVEL, -1)
+
+    fun readPeerIsCharging(): Boolean = prefs.getBoolean(KEY_PEER_IS_CHARGING, false)
+
+    fun writeState(
+        message: String,
+        checksum: String,
+        artUpdatedAt: Long,
+        lastPingA: Long,
+        lastPingB: Long,
+        peerBatteryLevel: Int,
+        peerIsCharging: Boolean
+    ) {
         prefs.edit()
             .putString(KEY_MESSAGE, message)
             .putString(KEY_CHECKSUM, checksum)
             .putLong(KEY_ART_UPDATED_AT, artUpdatedAt)
             .putLong(KEY_LAST_PING_A, lastPingA)
             .putLong(KEY_LAST_PING_B, lastPingB)
+            .putInt(KEY_PEER_BATTERY_LEVEL, peerBatteryLevel)
+            .putBoolean(KEY_PEER_IS_CHARGING, peerIsCharging)
             .apply()
     }
 
@@ -111,6 +126,8 @@ class WidgetStateStore(context: Context) {
         private const val KEY_ART_UPDATED_AT = "art_updated_at"
         private const val KEY_LAST_PING_A = "last_ping_a"
         private const val KEY_LAST_PING_B = "last_ping_b"
+        private const val KEY_PEER_BATTERY_LEVEL = "peer_battery_level"
+        private const val KEY_PEER_IS_CHARGING = "peer_is_charging"
         private const val KEY_LINK_STATUS = "link_status"
         private const val KEY_FAILURE_COUNT = "failure_count"
         private const val KEY_ALERT_SENT = "failure_alert_sent"

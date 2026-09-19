@@ -1,8 +1,10 @@
 package com.dotheart.widget.net
 
 import android.util.Log
+import com.dotheart.widget.util.BatteryStatus
 import java.io.IOException
 import kotlinx.coroutines.delay
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -53,10 +55,17 @@ class WidgetRepository(private val baseUrl: String, private val pingToken: Strin
 
     private val client = HttpClientProvider.client
 
-    suspend fun fetchCurrentState(knownChecksum: String?): StateFetchResult = try {
+    /**
+     * [userId] ("a"/"b") tells the backend who is asking so it can return
+     * the *peer's* battery state (peer_battery_level / peer_is_charging).
+     */
+    suspend fun fetchCurrentState(knownChecksum: String?, userId: String): StateFetchResult = try {
         withRetry {
+            val url = "$baseUrl/api/v1/widget/current".toHttpUrl().newBuilder()
+                .addQueryParameter("user_id", userId)
+                .build()
             val request = Request.Builder()
-                .url("$baseUrl/api/v1/widget/current")
+                .url(url)
                 .apply { knownChecksum?.let { header("If-None-Match", "\"$it\"") } }
                 .get()
                 .build()
@@ -64,7 +73,7 @@ class WidgetRepository(private val baseUrl: String, private val pingToken: Strin
             client.newCall(request).execute().use { response ->
                 when {
                     response.code == 304 -> StateFetchResult.NotModified
-                    response.isSuccessful -> parseStateBody(response.body?.string(), knownChecksum, response.code)
+                    response.isSuccessful -> parseStateBody(response.body?.string(), response.code)
                     response.code in RETRYABLE_HTTP_CODES ->
                         StateFetchResult.Failed(retryable = true, reason = "HTTP ${response.code}", httpCode = response.code)
                     else ->
@@ -116,13 +125,22 @@ class WidgetRepository(private val baseUrl: String, private val pingToken: Strin
         ImageFetchResult.Failed(retryable = true, reason = e.message ?: "Network error")
     }
 
-    suspend fun sendPing(userId: String): PingResult {
+    /**
+     * [battery] is sent as `battery_level` / `is_charging` JSON fields when
+     * non-null; a null reading just sends the bare presence ping.
+     */
+    suspend fun sendPing(userId: String, battery: BatteryStatus? = null): PingResult {
         if (pingToken.isBlank()) {
             return PingResult.Failed(retryable = false, reason = "Ping token not configured.")
         }
         return try {
             withRetry {
-                val jsonBody = JSONObject().put("user_id", userId).toString()
+                val jsonBody = JSONObject().put("user_id", userId).apply {
+                    if (battery != null) {
+                        put("battery_level", battery.levelPercent)
+                        put("is_charging", battery.isCharging)
+                    }
+                }.toString()
                 val requestBody = jsonBody.toRequestBody("application/json; charset=utf-8".toMediaType())
                 val request = Request.Builder()
                     .url("$baseUrl/api/v1/widget/ping")
@@ -160,17 +178,15 @@ class WidgetRepository(private val baseUrl: String, private val pingToken: Strin
         }
     }
 
-    private fun parseStateBody(body: String?, knownChecksum: String?, httpCode: Int): StateFetchResult {
+    private fun parseStateBody(body: String?, httpCode: Int): StateFetchResult {
         if (body.isNullOrBlank()) {
             return StateFetchResult.Failed(retryable = true, reason = "Empty response body.", httpCode = httpCode)
         }
         return try {
-            val state = WidgetState.fromJson(body)
-            if (knownChecksum != null && state.checksum == knownChecksum) {
-                StateFetchResult.NotModified
-            } else {
-                StateFetchResult.Updated(state)
-            }
+            // Always Updated, even on a checksum match: peer battery and ping
+            // fields change independently of the art, and the worker skips
+            // the image download itself when the checksum is unchanged.
+            StateFetchResult.Updated(WidgetState.fromJson(body))
         } catch (e: Exception) {
             Log.w(TAG, "Malformed JSON in /current response.", e)
             StateFetchResult.Failed(retryable = true, reason = "Malformed response body.", httpCode = httpCode)
