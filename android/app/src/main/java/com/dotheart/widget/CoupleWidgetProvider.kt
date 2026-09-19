@@ -10,7 +10,9 @@ import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Bundle
 import android.widget.RemoteViews
+import com.dotheart.widget.render.PixelArtRenderer
 import com.dotheart.widget.state.WidgetStateStore
+import com.dotheart.widget.util.BatteryReader
 import com.dotheart.widget.util.RelativeTime
 import com.dotheart.widget.work.WidgetSyncScheduler
 import kotlin.math.abs
@@ -102,6 +104,34 @@ class CoupleWidgetProvider : AppWidgetProvider() {
     companion object {
         const val ACTION_MANUAL_REFRESH = "com.dotheart.widget.ACTION_MANUAL_REFRESH"
 
+        /** Peer silent for at least this long: ticker shows [SIGNAL WEAK]. */
+        private const val STALE_THRESHOLD_MS = 2L * 60 * 60 * 1000
+
+        /** Peer silent for more than this long: [CARRIER LOST] and decayed canvas. */
+        private const val DECAYED_THRESHOLD_MS = 24L * 60 * 60 * 1000
+
+        private enum class Signal { ACTIVE, STALE, DECAYED }
+
+        /**
+         * Classifies the peer's connection by time since their last ping.
+         * A peer who has never pinged (timestamp 0) is ACTIVE: there is no
+         * baseline to call stale, and a fresh install must not look dead.
+         */
+        private fun evaluateSignal(store: WidgetStateStore, now: Long): Signal {
+            val peerPingSeconds = if (BuildConfig.DOTHEART_LOCAL_USER_ID == "a") {
+                store.readLastPingB()
+            } else {
+                store.readLastPingA()
+            }
+            if (peerPingSeconds <= 0L) return Signal.ACTIVE
+            val timeSinceLastPing = now - peerPingSeconds * 1000L
+            return when {
+                timeSinceLastPing > DECAYED_THRESHOLD_MS -> Signal.DECAYED
+                timeSinceLastPing >= STALE_THRESHOLD_MS -> Signal.STALE
+                else -> Signal.ACTIVE
+            }
+        }
+
         /** Both users' pings count as "linked" if this close together. */
         private const val LINK_WINDOW_SECONDS = 600L // 10 minutes
 
@@ -132,9 +162,17 @@ class CoupleWidgetProvider : AppWidgetProvider() {
             val store = WidgetStateStore(context)
             val views = RemoteViews(context.packageName, R.layout.widget_couple)
 
+            val signal = evaluateSignal(store, System.currentTimeMillis())
             val cachedBitmap: Bitmap? = store.loadCachedBitmap()
             if (cachedBitmap != null) {
-                views.setImageViewBitmap(R.id.widget_image, cachedBitmap)
+                // Below 15% local battery, skip the per-pixel decay pass and
+                // show the cached art as-is: no extra CPU work on a dying phone.
+                val shown = if (signal == Signal.DECAYED && !BatteryReader.isLow(context)) {
+                    PixelArtRenderer.applyDecay(cachedBitmap)
+                } else {
+                    cachedBitmap
+                }
+                views.setImageViewBitmap(R.id.widget_image, shown)
             } else {
                 // No art has ever synced yet - fully transparent, not a
                 // decorative placeholder graphic. The status line below
@@ -144,7 +182,7 @@ class CoupleWidgetProvider : AppWidgetProvider() {
 
             views.setTextViewText(
                 R.id.widget_status,
-                buildStatusLine(store, showSyncing)
+                buildStatusLine(store, showSyncing, signal)
             )
 
             val pingA = store.readLastPingA()
@@ -190,7 +228,7 @@ class CoupleWidgetProvider : AppWidgetProvider() {
          * or, mid-tap:
          *   [SYNCING...] > out for milk
          */
-        private fun buildStatusLine(store: WidgetStateStore, showSyncing: Boolean): String {
+        private fun buildStatusLine(store: WidgetStateStore, showSyncing: Boolean, signal: Signal): String {
             val header = if (showSyncing) {
                 "[SYNCING...]"
             } else {
@@ -201,7 +239,12 @@ class CoupleWidgetProvider : AppWidgetProvider() {
                     WidgetStateStore.LINK_STATUS_UNREACHABLE -> "ERR"
                     else -> status.toString()
                 }
-                "PEER ${peerPowerReadout(store)} // SYNC $ago // LINK $link"
+                val base = "PEER ${peerPowerReadout(store)} // SYNC $ago // LINK $link"
+                when (signal) {
+                    Signal.ACTIVE -> base
+                    Signal.STALE -> "$base [SIGNAL WEAK]"
+                    Signal.DECAYED -> "$base [CARRIER LOST]"
+                }
             }
 
             val message = store.readMessage()

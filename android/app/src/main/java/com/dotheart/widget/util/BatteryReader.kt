@@ -16,6 +16,15 @@ data class BatteryStatus(val levelPercent: Int, val isCharging: Boolean)
  */
 object BatteryReader {
 
+    /** Below this local battery percent the widget skips all graphic reprocessing. */
+    const val LOW_BATTERY_PERCENT = 15
+
+    /** True only when a valid reading exists and it is strictly below [LOW_BATTERY_PERCENT]. */
+    fun isLow(context: Context): Boolean {
+        val status = read(context) ?: return false
+        return status.levelPercent < LOW_BATTERY_PERCENT
+    }
+
     /** Returns null if the system has no battery broadcast or it lacks a usable level. */
     fun read(context: Context): BatteryStatus? {
         val intent: Intent = context.applicationContext

@@ -111,6 +111,62 @@ object PixelArtRenderer {
         }
     }
 
+    /** 4x4 Bayer threshold matrix (values 0..15) for the 1-bit ordered dither. */
+    private val BAYER_4X4 = intArrayOf(
+        0, 8, 2, 10,
+        12, 4, 14, 6,
+        3, 11, 1, 9,
+        15, 7, 13, 5
+    )
+
+    /** Dither cells with a Bayer value below this get darkened: 6/16 = 37.5% of pixels. */
+    private const val DITHER_DENSITY = 6
+
+    /**
+     * Returns a new bitmap of identical dimensions with the "carrier lost"
+     * decay look: contrast halved around mid-gray (c' = 128 + (c - 128) / 2)
+     * and a 4x4 Bayer ordered dither that halves the brightness of a fixed
+     * 37.5% of pixels in a regular lattice.
+     *
+     * Purely per-pixel: no resampling, so the nearest-neighbor edges produced
+     * by [decodeAndScale] stay exactly as sharp as the input. Alpha is
+     * preserved and fully transparent pixels are skipped. [source] is never
+     * modified (it may be the immutable cached bitmap) and the caller owns
+     * the returned bitmap. Cost is one pass over at most
+     * MAX_WIDGET_BITMAP_DIMENSION_PX^2 pixels.
+     */
+    fun applyDecay(source: Bitmap): Bitmap {
+        val width = source.width
+        val height = source.height
+        val pixels = IntArray(width * height)
+        source.getPixels(pixels, 0, width, 0, 0, width, height)
+
+        for (y in 0 until height) {
+            val rowOffset = y * width
+            val bayerRow = (y and 3) * 4
+            for (x in 0 until width) {
+                val argb = pixels[rowOffset + x]
+                val alpha = argb ushr 24
+                if (alpha == 0) continue
+
+                var r = 128 + (((argb shr 16) and 0xFF) - 128) / 2
+                var g = 128 + (((argb shr 8) and 0xFF) - 128) / 2
+                var b = 128 + ((argb and 0xFF) - 128) / 2
+
+                if (BAYER_4X4[bayerRow + (x and 3)] < DITHER_DENSITY) {
+                    r = r shr 1
+                    g = g shr 1
+                    b = b shr 1
+                }
+                pixels[rowOffset + x] = (alpha shl 24) or (r shl 16) or (g shl 8) or b
+            }
+        }
+
+        val output = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        output.setPixels(pixels, 0, width, 0, 0, width, height)
+        return output
+    }
+
     /**
      * Proportionally shrinks (width, height) until the ARGB_8888 byte cost
      * fits under [MAX_OUTPUT_BYTES]. A pure function of the dimension

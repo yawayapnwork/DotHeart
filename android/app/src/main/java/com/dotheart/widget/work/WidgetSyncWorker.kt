@@ -45,10 +45,22 @@ class WidgetSyncWorker(
 ) : CoroutineWorker(context, params) {
 
     private val stateStore = WidgetStateStore(applicationContext)
+    private val lowBattery: Boolean
+        get() = BatteryReader.isLow(applicationContext)
     private val repository = WidgetRepository(BuildConfig.DOTHEART_BASE_URL, BuildConfig.DOTHEART_PING_TOKEN)
 
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
         try {
+            // Low-battery protection: below 15% the periodic poll does
+            // nothing at all (no radio, no decode, no widget redraw) so it
+            // can't hold the CPU awake. A manual tap is user-initiated and
+            // still runs, but handleUpdatedState skips all graphics work.
+            val userInitiated = inputData.getBoolean(WidgetSyncScheduler.INPUT_KEY_SEND_PING, false)
+            if (!userInitiated && lowBattery) {
+                Log.i(TAG, "Local battery below ${BatteryReader.LOW_BATTERY_PERCENT}%; skipping periodic sync.")
+                return@withContext Result.success()
+            }
+
             maybeSendPing()
 
             val knownChecksum = stateStore.readChecksum()
@@ -116,7 +128,15 @@ class WidgetSyncWorker(
         val state = result.state
         var freshBitmap: Bitmap? = null
 
-        if (state.checksum != knownChecksum) {
+        // Read once so the decision and the checksum written below agree.
+        val skipGraphics = lowBattery
+        if (skipGraphics) {
+            // Skip image fetch/decode/scale entirely and keep the cached art.
+            // The stored checksum is left unchanged so the art is fetched on
+            // the first sync after battery recovers; text/ping/peer-battery
+            // state is still persisted below.
+            Log.i(TAG, "Local battery low; bypassing graphic reprocessing.")
+        } else if (state.checksum != knownChecksum) {
             when (val imageResult = repository.fetchImage(state.imageUrl, knownChecksum)) {
                 is ImageFetchResult.Fetched -> {
                     freshBitmap = try {
@@ -153,7 +173,7 @@ class WidgetSyncWorker(
         }
         stateStore.writeState(
             message = state.message,
-            checksum = state.checksum,
+            checksum = if (skipGraphics) (knownChecksum ?: "") else state.checksum,
             artUpdatedAt = state.timestamp,
             lastPingA = state.lastPingA,
             lastPingB = state.lastPingB,
