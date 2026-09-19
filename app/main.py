@@ -5,15 +5,21 @@ Endpoints:
   POST /api/v1/widget/ping    -- record a user's presence ping
   GET  /api/v1/widget/current -- fetch the latest state as JSON
   GET  /static/{filename}     -- serve the current image bytes
+  POST   /api/v1/calendar/event            -- add or update a shared event
+  GET    /api/v1/calendar/events           -- list events in a date range
+  DELETE /api/v1/calendar/event/{event_id} -- remove an event
 
 Designed to run as a single uvicorn worker inside a 512 MB container, with
 all state on local/persistent disk (SQLite + filesystem, no external DB).
 """
 from __future__ import annotations
 
+import calendar as pycalendar
 import logging
 import sys
 from contextlib import asynccontextmanager
+from datetime import date, datetime, timezone
+from typing import Literal
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import FileResponse, JSONResponse
@@ -29,7 +35,13 @@ from app.security import (
     validate_image_bytes,
     verify_token,
 )
-from app.storage import VALID_USER_IDS, WidgetStorage
+from app.storage import (
+    CALENDAR_FILENAME,
+    VALID_USER_IDS,
+    CalendarFullError,
+    CalendarStorage,
+    WidgetStorage,
+)
 
 logging.basicConfig(
     level=settings.log_level,
@@ -39,15 +51,20 @@ logging.basicConfig(
 logger = logging.getLogger("dotheart.api")
 
 storage: WidgetStorage | None = None
+calendar_storage: CalendarStorage | None = None
+
+MAX_CALENDAR_TITLE_LENGTH = 40
+MAX_CALENDAR_RANGE_DAYS = 366
 
 _bearer_scheme = HTTPBearer(auto_error=False)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global storage
+    global storage, calendar_storage
     settings.ensure_directories()
     storage = WidgetStorage(db_path=settings.db_path, image_dir=settings.image_dir)
+    calendar_storage = CalendarStorage(settings.data_dir / CALENDAR_FILENAME)
     logger.info("DotHeart backend started. data_dir=%s", settings.data_dir)
     try:
         yield
@@ -246,6 +263,108 @@ async def get_static_image(filename: str) -> FileResponse:
         media_type=media_type,
         headers={"Cache-Control": "no-cache, max-age=0, must-revalidate"},
     )
+
+
+class CalendarEventRequest(BaseModel):
+    """Add an event, or update the one named by id."""
+
+    date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
+    title: str = Field(min_length=1, max_length=200)
+    author: Literal["a", "b"]
+    id: str | None = Field(default=None, pattern=r"^[0-9a-f]{8}$")
+
+
+_DATE_PATTERN = r"^\d{4}-\d{2}-\d{2}$"
+
+
+def _parse_date_param(name: str, value: str) -> date:
+    try:
+        return date.fromisoformat(value)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=f"{name} is not a valid date."
+        ) from exc
+
+
+@app.post("/api/v1/calendar/event", dependencies=[Depends(_require_bearer_token)])
+async def upsert_calendar_event(payload: CalendarEventRequest) -> JSONResponse:
+    try:
+        title = sanitize_message(payload.title, MAX_CALENDAR_TITLE_LENGTH)
+    except InvalidMessageError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    _parse_date_param("date", payload.date)
+
+    assert calendar_storage is not None
+    try:
+        event, created = calendar_storage.upsert_event(
+            payload.date, title, payload.author, event_id=payload.id
+        )
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="No event with that id."
+        ) from exc
+    except CalendarFullError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+    logger.info(
+        "Calendar event %s: id=%s date=%s",
+        "created" if created else "updated",
+        event["id"],
+        event["date"],
+    )
+    return JSONResponse(
+        status_code=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+        content=event,
+    )
+
+
+@app.get("/api/v1/calendar/events", dependencies=[Depends(_require_bearer_token)])
+async def list_calendar_events(
+    start: str | None = Query(default=None, pattern=_DATE_PATTERN),
+    end: str | None = Query(default=None, pattern=_DATE_PATTERN),
+) -> JSONResponse:
+    """Events from `start` to `end` inclusive, sorted by date. By default,
+    from today (server UTC date) to the end of the current month; clients
+    in another timezone, or wanting to look past the month boundary, pass
+    explicit start/end (at most MAX_CALENDAR_RANGE_DAYS apart).
+    """
+    start_date = (
+        _parse_date_param("start", start) if start else datetime.now(timezone.utc).date()
+    )
+    if end:
+        end_date = _parse_date_param("end", end)
+    else:
+        last_day = pycalendar.monthrange(start_date.year, start_date.month)[1]
+        end_date = start_date.replace(day=last_day)
+
+    if end_date < start_date:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="end must not be before start."
+        )
+    if (end_date - start_date).days > MAX_CALENDAR_RANGE_DAYS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Range must not exceed {MAX_CALENDAR_RANGE_DAYS} days.",
+        )
+
+    assert calendar_storage is not None
+    return JSONResponse(
+        status_code=status.HTTP_200_OK,
+        content={
+            "start": start_date.isoformat(),
+            "end": end_date.isoformat(),
+            "events": calendar_storage.list_events(start_date, end_date),
+        },
+    )
+
+
+@app.delete("/api/v1/calendar/event/{event_id}", dependencies=[Depends(_require_bearer_token)])
+async def delete_calendar_event(event_id: str) -> JSONResponse:
+    assert calendar_storage is not None
+    if not calendar_storage.delete_event(event_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No event with that id.")
+    logger.info("Calendar event deleted: id=%s", event_id)
+    return JSONResponse(status_code=status.HTTP_200_OK, content={"deleted": event_id})
 
 
 @app.get("/health")

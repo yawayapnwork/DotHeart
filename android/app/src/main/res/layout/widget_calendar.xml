@@ -1,0 +1,326 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Micro-calendar widget: a 7-day strip (Mon..Sun of the current week) over
+     a one-line monospace readout of the next upcoming event. Pure black,
+     square corners, no decoration. RemoteViews-safe: only FrameLayout/
+     LinearLayout/TextView/ImageView.
+
+     Per day cell (i = 1..7):
+       cal_letter_i  fixed weekday letter
+       cal_num_i     day of month; today is inverted (white block, black text)
+                     via setBackgroundResource + setTextColor at render time
+       cal_dot_i     solid square dot (no anti-aliased edges), INVISIBLE
+                     unless that day has at least one event
+     cal_readout is the tap target that cycles through upcoming events, see
+     CalendarWidgetProvider. -->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/cal_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/widget_bg">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:orientation="vertical"
+        android:paddingStart="8dp"
+        android:paddingEnd="8dp"
+        android:paddingTop="10dp">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:gravity="center_horizontal"
+                android:orientation="vertical">
+
+                <TextView
+                    android:id="@+id/cal_letter_1"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:fontFamily="monospace"
+                    android:text="M"
+                    android:textColor="@color/widget_fg"
+                    android:textSize="12sp" />
+
+                <TextView
+                    android:id="@+id/cal_num_1"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="3dp"
+                    android:minWidth="26dp"
+                    android:gravity="center"
+                    android:paddingTop="3dp"
+                    android:paddingBottom="3dp"
+                    android:fontFamily="monospace"
+                    android:textColor="@color/widget_fg"
+                    android:textSize="15sp" />
+
+                <ImageView
+                    android:id="@+id/cal_dot_1"
+                    android:layout_width="5dp"
+                    android:layout_height="5dp"
+                    android:layout_marginTop="4dp"
+                    android:src="@drawable/indicator_square"
+                    android:visibility="invisible"
+                    android:contentDescription="@string/calendar_event_dot_description" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:gravity="center_horizontal"
+                android:orientation="vertical">
+
+                <TextView
+                    android:id="@+id/cal_letter_2"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:fontFamily="monospace"
+                    android:text="T"
+                    android:textColor="@color/widget_fg"
+                    android:textSize="12sp" />
+
+                <TextView
+                    android:id="@+id/cal_num_2"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="3dp"
+                    android:minWidth="26dp"
+                    android:gravity="center"
+                    android:paddingTop="3dp"
+                    android:paddingBottom="3dp"
+                    android:fontFamily="monospace"
+                    android:textColor="@color/widget_fg"
+                    android:textSize="15sp" />
+
+                <ImageView
+                    android:id="@+id/cal_dot_2"
+                    android:layout_width="5dp"
+                    android:layout_height="5dp"
+                    android:layout_marginTop="4dp"
+                    android:src="@drawable/indicator_square"
+                    android:visibility="invisible"
+                    android:contentDescription="@string/calendar_event_dot_description" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:gravity="center_horizontal"
+                android:orientation="vertical">
+
+                <TextView
+                    android:id="@+id/cal_letter_3"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:fontFamily="monospace"
+                    android:text="W"
+                    android:textColor="@color/widget_fg"
+                    android:textSize="12sp" />
+
+                <TextView
+                    android:id="@+id/cal_num_3"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="3dp"
+                    android:minWidth="26dp"
+                    android:gravity="center"
+                    android:paddingTop="3dp"
+                    android:paddingBottom="3dp"
+                    android:fontFamily="monospace"
+                    android:textColor="@color/widget_fg"
+                    android:textSize="15sp" />
+
+                <ImageView
+                    android:id="@+id/cal_dot_3"
+                    android:layout_width="5dp"
+                    android:layout_height="5dp"
+                    android:layout_marginTop="4dp"
+                    android:src="@drawable/indicator_square"
+                    android:visibility="invisible"
+                    android:contentDescription="@string/calendar_event_dot_description" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:gravity="center_horizontal"
+                android:orientation="vertical">
+
+                <TextView
+                    android:id="@+id/cal_letter_4"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:fontFamily="monospace"
+                    android:text="T"
+                    android:textColor="@color/widget_fg"
+                    android:textSize="12sp" />
+
+                <TextView
+                    android:id="@+id/cal_num_4"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="3dp"
+                    android:minWidth="26dp"
+                    android:gravity="center"
+                    android:paddingTop="3dp"
+                    android:paddingBottom="3dp"
+                    android:fontFamily="monospace"
+                    android:textColor="@color/widget_fg"
+                    android:textSize="15sp" />
+
+                <ImageView
+                    android:id="@+id/cal_dot_4"
+                    android:layout_width="5dp"
+                    android:layout_height="5dp"
+                    android:layout_marginTop="4dp"
+                    android:src="@drawable/indicator_square"
+                    android:visibility="invisible"
+                    android:contentDescription="@string/calendar_event_dot_description" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:gravity="center_horizontal"
+                android:orientation="vertical">
+
+                <TextView
+                    android:id="@+id/cal_letter_5"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:fontFamily="monospace"
+                    android:text="F"
+                    android:textColor="@color/widget_fg"
+                    android:textSize="12sp" />
+
+                <TextView
+                    android:id="@+id/cal_num_5"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="3dp"
+                    android:minWidth="26dp"
+                    android:gravity="center"
+                    android:paddingTop="3dp"
+                    android:paddingBottom="3dp"
+                    android:fontFamily="monospace"
+                    android:textColor="@color/widget_fg"
+                    android:textSize="15sp" />
+
+                <ImageView
+                    android:id="@+id/cal_dot_5"
+                    android:layout_width="5dp"
+                    android:layout_height="5dp"
+                    android:layout_marginTop="4dp"
+                    android:src="@drawable/indicator_square"
+                    android:visibility="invisible"
+                    android:contentDescription="@string/calendar_event_dot_description" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:gravity="center_horizontal"
+                android:orientation="vertical">
+
+                <TextView
+                    android:id="@+id/cal_letter_6"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:fontFamily="monospace"
+                    android:text="S"
+                    android:textColor="@color/widget_fg"
+                    android:textSize="12sp" />
+
+                <TextView
+                    android:id="@+id/cal_num_6"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="3dp"
+                    android:minWidth="26dp"
+                    android:gravity="center"
+                    android:paddingTop="3dp"
+                    android:paddingBottom="3dp"
+                    android:fontFamily="monospace"
+                    android:textColor="@color/widget_fg"
+                    android:textSize="15sp" />
+
+                <ImageView
+                    android:id="@+id/cal_dot_6"
+                    android:layout_width="5dp"
+                    android:layout_height="5dp"
+                    android:layout_marginTop="4dp"
+                    android:src="@drawable/indicator_square"
+                    android:visibility="invisible"
+                    android:contentDescription="@string/calendar_event_dot_description" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:gravity="center_horizontal"
+                android:orientation="vertical">
+
+                <TextView
+                    android:id="@+id/cal_letter_7"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:fontFamily="monospace"
+                    android:text="S"
+                    android:textColor="@color/widget_fg"
+                    android:textSize="12sp" />
+
+                <TextView
+                    android:id="@+id/cal_num_7"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="3dp"
+                    android:minWidth="26dp"
+                    android:gravity="center"
+                    android:paddingTop="3dp"
+                    android:paddingBottom="3dp"
+                    android:fontFamily="monospace"
+                    android:textColor="@color/widget_fg"
+                    android:textSize="15sp" />
+
+                <ImageView
+                    android:id="@+id/cal_dot_7"
+                    android:layout_width="5dp"
+                    android:layout_height="5dp"
+                    android:layout_marginTop="4dp"
+                    android:src="@drawable/indicator_square"
+                    android:visibility="invisible"
+                    android:contentDescription="@string/calendar_event_dot_description" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <!-- Next-milestone readout, e.g. "NEXT: 25 SEP // [VISITING] (T-6d)".
+             Generous vertical padding: this is the tap target. -->
+        <TextView
+            android:id="@+id/cal_readout"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingTop="8dp"
+            android:paddingBottom="8dp"
+            android:singleLine="true"
+            android:ellipsize="end"
+            android:fontFamily="monospace"
+            android:textColor="@color/widget_fg"
+            android:textSize="12sp"
+            android:text="@string/calendar_default_readout" />
+    </LinearLayout>
+
+</FrameLayout>

@@ -126,10 +126,11 @@ class CoupleWidgetProvider : AppWidgetProvider() {
 
     override fun onDisabled(context: Context) {
         super.onDisabled(context)
-        // Last widget instance removed - cancel the periodic job so no
+        // Last couple widget removed - cancel the periodic job so no
         // orphaned background work keeps polling and draining battery for
-        // a widget that no longer exists.
-        WidgetSyncScheduler.cancel(context)
+        // a widget that no longer exists, unless a calendar widget still
+        // relies on the same job.
+        WidgetSyncScheduler.cancelIfUnused(context)
     }
 
     companion object {
@@ -187,6 +188,10 @@ class CoupleWidgetProvider : AppWidgetProvider() {
                 render(context, appWidgetManager, id, showSyncing = false)
             }
         }
+
+        /** True while at least one couple widget is placed on a home screen. */
+        fun hasInstances(context: Context): Boolean =
+            AppWidgetManager.getInstance(context).getAppWidgetIds(componentName(context)).isNotEmpty()
 
         private fun componentName(context: Context) =
             ComponentName(context, CoupleWidgetProvider::class.java)

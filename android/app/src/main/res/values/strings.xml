@@ -6,6 +6,10 @@
     <string name="widget_default_status">[SYNC NEVER // LINK ?]</string>
     <string name="widget_image_description">Synced pixel art payload</string>
     <string name="widget_link_description">Presence link indicator</string>
+    <string name="calendar_widget_label">DotHeart Calendar</string>
+    <string name="calendar_widget_description">Shared 7-day strip + next event readout.</string>
+    <string name="calendar_default_readout">NEXT: -- // [NO PLANS]</string>
+    <string name="calendar_event_dot_description">Day has plans</string>
     <string name="notification_stale_title">DOTHEART: LINK STALE</string>
     <string name="notification_stale_body">no successful sync in %1$d attempts - tap widget to retry</string>
 </resources>

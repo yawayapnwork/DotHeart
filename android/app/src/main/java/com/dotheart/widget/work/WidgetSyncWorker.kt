@@ -13,8 +13,10 @@ import androidx.work.CoroutineWorker
 import androidx.work.ListenableWorker.Result
 import androidx.work.WorkerParameters
 import com.dotheart.widget.BuildConfig
+import com.dotheart.widget.CalendarWidgetProvider
 import com.dotheart.widget.CoupleWidgetProvider
 import com.dotheart.widget.R
+import com.dotheart.widget.net.CalendarFetchResult
 import com.dotheart.widget.net.ImageFetchResult
 import com.dotheart.widget.net.PingResult
 import com.dotheart.widget.net.StateFetchResult
@@ -24,6 +26,9 @@ import com.dotheart.widget.state.WidgetStateStore
 import com.dotheart.widget.util.BatteryReader
 import com.dotheart.widget.util.HapticFeedback
 import com.dotheart.widget.util.NotificationChannels
+import java.time.DayOfWeek
+import java.time.LocalDate
+import java.time.temporal.TemporalAdjusters
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -67,6 +72,7 @@ class WidgetSyncWorker(
             val knownChecksum = stateStore.readChecksum()
             when (val stateResult = repository.fetchCurrentState(knownChecksum, BuildConfig.DOTHEART_LOCAL_USER_ID)) {
                 is StateFetchResult.NotModified -> {
+                    syncCalendar()
                     Log.i(TAG, "Widget state unchanged (checksum match); skipping render.")
                     // NotModified only ever originates from a successful
                     // (2xx, or a literal 304) HTTP response - see
@@ -78,6 +84,7 @@ class WidgetSyncWorker(
                     Result.success()
                 }
                 is StateFetchResult.Updated -> {
+                    syncCalendar()
                     handleUpdatedState(stateResult, knownChecksum)
                 }
                 is StateFetchResult.Failed -> {
@@ -119,6 +126,30 @@ class WidgetSyncWorker(
                 Log.i(TAG, "Ping sent: user_id=$userId timestamp=${result.timestamp}")
             is PingResult.Failed ->
                 Log.w(TAG, "Ping not delivered (retryable=${result.retryable}): ${result.reason}")
+        }
+    }
+
+    /**
+     * Refreshes the cached calendar events for the calendar widget. Runs
+     * only after a successful state fetch (the server is known to be awake,
+     * so a down backend is not waited on twice) and only when a calendar
+     * widget is actually placed, so users without one pay no extra request.
+     * Best-effort: a failure is logged and the previously cached events
+     * stay on screen; it never fails or retries the main sync.
+     */
+    private suspend fun syncCalendar() {
+        if (!CalendarWidgetProvider.hasInstances(applicationContext)) return
+
+        val today = LocalDate.now()
+        val weekStart = today.with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY))
+        val end = today.plusDays(CALENDAR_LOOKAHEAD_DAYS)
+        when (val result = repository.fetchCalendarEvents(weekStart, end)) {
+            is CalendarFetchResult.Success -> {
+                stateStore.writeCalendarEvents(result.events)
+                CalendarWidgetProvider.refreshAllWidgets(applicationContext)
+            }
+            is CalendarFetchResult.Failed ->
+                Log.w(TAG, "Calendar sync failed (retryable=${result.retryable}): ${result.reason}")
         }
     }
 
@@ -256,5 +287,8 @@ class WidgetSyncWorker(
         private const val FAILURE_ALERT_THRESHOLD = 5
         private const val MAX_WORKMANAGER_RETRIES = 8
         private const val STALE_NOTIFICATION_ID = 1001
+
+        /** How far ahead of today the calendar widget looks for its NEXT readout. */
+        private const val CALENDAR_LOOKAHEAD_DAYS = 60L
     }
 }

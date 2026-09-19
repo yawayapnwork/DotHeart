@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.util.Log
+import com.dotheart.widget.net.CalendarEvent
 import com.dotheart.widget.net.WidgetNote
 import org.json.JSONArray
 import org.json.JSONException
@@ -104,6 +105,33 @@ class WidgetStateStore(context: Context) {
         return next
     }
 
+    /** Cached calendar events (as last fetched), empty if none/corrupt. */
+    fun readCalendarEvents(): List<CalendarEvent> {
+        val raw = prefs.getString(KEY_CALENDAR_EVENTS, null) ?: return emptyList()
+        return try {
+            CalendarEvent.fromJsonArray(JSONArray(raw))
+        } catch (e: JSONException) {
+            Log.w(TAG, "Discarding corrupt cached calendar events.", e)
+            emptyList()
+        }
+    }
+
+    fun writeCalendarEvents(events: List<CalendarEvent>) {
+        prefs.edit().putString(KEY_CALENDAR_EVENTS, CalendarEvent.toJsonArray(events).toString()).apply()
+    }
+
+    /**
+     * Which upcoming event the calendar readout is showing. Stored as an
+     * ever-growing counter and reduced modulo the current event count at
+     * render time, so it stays valid when events are added or removed.
+     */
+    fun readCalendarCursor(): Int = prefs.getInt(KEY_CALENDAR_CURSOR, 0)
+
+    fun advanceCalendarCursor() {
+        // Wrap far below Int.MAX_VALUE so the counter can never overflow negative.
+        prefs.edit().putInt(KEY_CALENDAR_CURSOR, (readCalendarCursor() + 1) % CALENDAR_CURSOR_WRAP).apply()
+    }
+
     /** Epoch millis of the previous widget-body tap, for double-tap detection. */
     fun readLastTapMillis(): Long = prefs.getLong(KEY_LAST_TAP_MS, 0L)
 
@@ -195,6 +223,9 @@ class WidgetStateStore(context: Context) {
         private const val KEY_NOTES = "notes"
         private const val KEY_DISPLAY_MODE = "display_mode"
         private const val KEY_LAST_TAP_MS = "last_tap_ms"
+        private const val KEY_CALENDAR_EVENTS = "calendar_events"
+        private const val KEY_CALENDAR_CURSOR = "calendar_cursor"
+        private const val CALENDAR_CURSOR_WRAP = 1_000_000
         private const val KEY_LINK_STATUS = "link_status"
         private const val KEY_FAILURE_COUNT = "failure_count"
         private const val KEY_ALERT_SENT = "failure_alert_sent"

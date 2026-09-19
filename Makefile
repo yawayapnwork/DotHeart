@@ -1,4 +1,4 @@
-# Installs the push_art CLI (scripts/push_art) onto PATH.
+# Installs the push_art and push_event CLIs (scripts/) onto PATH.
 #
 #   make install                 # installs to /usr/local/bin (likely needs sudo)
 #   sudo make install
@@ -11,21 +11,26 @@
 
 PREFIX  ?= /usr/local
 BIN_DIR := $(PREFIX)/bin
-SCRIPT  := push_art
-SCRIPT_SRC := scripts/$(SCRIPT)
+SCRIPTS := push_art push_event
 
 .PHONY: install uninstall check
 
 check:
-	@python3 -c "import ast; ast.parse(open('$(SCRIPT_SRC)', encoding='utf-8').read())"
-	@echo "OK: $(SCRIPT_SRC) is syntactically valid Python."
+	@for s in $(SCRIPTS); do \
+		python3 -c "import ast,sys; ast.parse(open('scripts/$$s', encoding='utf-8').read())" || exit 1; \
+		echo "OK: scripts/$$s is syntactically valid Python."; \
+	done
 
 install: check
 	install -d "$(BIN_DIR)"
-	install -m 0755 "$(SCRIPT_SRC)" "$(BIN_DIR)/$(SCRIPT)"
-	@echo "Installed $(SCRIPT) to $(BIN_DIR)/$(SCRIPT)"
-	@echo "Run '$(SCRIPT) --help' from any directory to confirm."
+	@for s in $(SCRIPTS); do \
+		install -m 0755 "scripts/$$s" "$(BIN_DIR)/$$s" || exit 1; \
+		echo "Installed $$s to $(BIN_DIR)/$$s"; \
+	done
+	@echo "Run 'push_art --help' or 'push_event --help' from any directory to confirm."
 
 uninstall:
-	rm -f "$(BIN_DIR)/$(SCRIPT)"
-	@echo "Removed $(BIN_DIR)/$(SCRIPT)"
+	@for s in $(SCRIPTS); do \
+		rm -f "$(BIN_DIR)/$$s"; \
+		echo "Removed $(BIN_DIR)/$$s"; \
+	done

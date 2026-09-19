@@ -1,0 +1,285 @@
+#!/usr/bin/env python3
+"""
+push_event - CLI to add, update, list or delete shared calendar events on the
+DotHeart FastAPI backend (/api/v1/calendar/*).
+
+Usage:
+    push_event --date 2026-09-25 --note "visiting"            add an event
+    push_event --id 3fa9c2d1 --date 2026-09-26 --note "visiting"   update it
+    push_event --delete 3fa9c2d1                              remove an event
+    push_event --list [--from 2026-09-01 --to 2026-09-30]     show events
+
+Adding the same date + note + author twice is harmless: the backend returns
+the existing event instead of creating a duplicate, so a retried command
+never double-books.
+
+Configuration (same sources and precedence as push_art):
+    1. ~/.config/dotheart/.env
+    2. ./.env
+    3. Real process environment variables
+
+Required variables:
+    DOTHEART_SERVER_URL   e.g. https://dotheart.onrender.com
+    DOTHEART_TOKEN        must match the backend's WIDGET_TOKEN
+Optional:
+    DOTHEART_AUTHOR       "a" or "b": who you are (default "a"); --author wins
+
+Output is terse: [ok]/[warn]/[error] prefixed lines only. Exit code 0 on
+success, 1 on a request the server or this script rejected, 2 on missing
+configuration. Requires Python 3.9+; standard library only.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sys
+import time
+import urllib.error
+import urllib.request
+from datetime import date, timedelta
+from pathlib import Path
+from typing import Any, Optional
+
+MAX_TITLE_LENGTH = 40  # matches backend MAX_CALENDAR_TITLE_LENGTH
+DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+EVENT_ID_PATTERN = re.compile(r"^[0-9a-f]{8}$")
+
+# Render's free tier answers 502/503/504 while a cold container boots; a
+# request can also just sit for ~50s. Mirror the Android client: generous
+# timeout, and two linear-backoff retries on gateway errors.
+REQUEST_TIMEOUT_SECONDS = 90
+GATEWAY_CODES = (502, 503, 504)
+GATEWAY_RETRIES = 2
+GATEWAY_BACKOFF_SECONDS = 2
+
+
+def eprint(*args: object) -> None:
+    print(*args, file=sys.stderr)
+
+
+# ---------------------------------------------------------------------------
+# Configuration loading (same behavior as push_art)
+# ---------------------------------------------------------------------------
+
+
+def load_dotenv(path: Path) -> None:
+    """Populate os.environ from a KEY=VALUE .env file without overriding
+    variables that are already set."""
+    if not path.is_file():
+        return
+    try:
+        content = path.read_text(encoding="utf-8")
+    except OSError:
+        return
+    for raw_line in content.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        if key:
+            os.environ.setdefault(key, value)
+
+
+def load_config() -> tuple[str, str, str]:
+    load_dotenv(Path.home() / ".config" / "dotheart" / ".env")
+    load_dotenv(Path.cwd() / ".env")
+
+    server_url = os.environ.get("DOTHEART_SERVER_URL", "").strip().rstrip("/")
+    token = os.environ.get("DOTHEART_TOKEN", "").strip()
+    author = os.environ.get("DOTHEART_AUTHOR", "a").strip().lower() or "a"
+
+    missing = []
+    if not server_url:
+        missing.append("DOTHEART_SERVER_URL")
+    if not token:
+        missing.append("DOTHEART_TOKEN")
+    if missing:
+        eprint(f"[error] missing config: {', '.join(missing)}")
+        eprint("[hint] set env vars or ./.env: DOTHEART_SERVER_URL=... DOTHEART_TOKEN=...")
+        sys.exit(2)
+    return server_url, token, author
+
+
+# ---------------------------------------------------------------------------
+# Validation
+# ---------------------------------------------------------------------------
+
+
+def parse_date_arg(flag: str, value: str) -> str:
+    if not DATE_PATTERN.match(value):
+        eprint(f"[error] {flag} must be YYYY-MM-DD, got {value!r}")
+        sys.exit(1)
+    try:
+        date.fromisoformat(value)
+    except ValueError:
+        eprint(f"[error] {flag} is not a real date: {value}")
+        sys.exit(1)
+    return value
+
+
+def clean_note(note: str) -> str:
+    cleaned = "".join(ch for ch in note if ch == " " or ch.isprintable()).strip()
+    if not cleaned:
+        eprint("[error] empty --note after sanitize")
+        sys.exit(1)
+    if len(cleaned) > MAX_TITLE_LENGTH:
+        eprint(f"[warn] note truncated to {MAX_TITLE_LENGTH} chars")
+        cleaned = cleaned[:MAX_TITLE_LENGTH].rstrip()
+    return cleaned
+
+
+# ---------------------------------------------------------------------------
+# HTTP
+# ---------------------------------------------------------------------------
+
+
+def request_json(
+    method: str, url: str, token: str, body: Optional[dict[str, Any]] = None
+) -> tuple[int, Any]:
+    """One authenticated JSON request. Returns (status, parsed_body) for any
+    HTTP response, including 4xx/5xx; exits with [error] on no response."""
+    data = None if body is None else json.dumps(body).encode("utf-8")
+    headers = {"Authorization": f"Bearer {token}"}
+    if data is not None:
+        headers["Content-Type"] = "application/json"
+
+    attempt = 0
+    while True:
+        req = urllib.request.Request(url, data=data, method=method, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT_SECONDS) as resp:
+                return resp.status, _parse(resp.read())
+        except urllib.error.HTTPError as exc:
+            if exc.code in GATEWAY_CODES and attempt < GATEWAY_RETRIES:
+                attempt += 1
+                eprint(f"[warn] HTTP {exc.code}, retrying ({attempt}/{GATEWAY_RETRIES})")
+                time.sleep(GATEWAY_BACKOFF_SECONDS * attempt)
+                continue
+            return exc.code, _parse(exc.read())
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            eprint(f"[error] request failed: {getattr(exc, 'reason', exc)}")
+            sys.exit(1)
+
+
+def _parse(raw: bytes) -> Any:
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return {}
+
+
+def explain_failure(status: int, payload: Any) -> None:
+    detail = payload.get("detail") if isinstance(payload, dict) else None
+    if status == 401:
+        eprint("[error] 401 invalid token (check DOTHEART_TOKEN)")
+    elif status == 404:
+        eprint("[error] 404 no event with that id")
+    elif status == 409:
+        eprint(f"[error] 409 {detail or 'calendar full'}")
+    else:
+        eprint(f"[error] HTTP {status}: {detail if detail else payload}")
+
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+
+
+def cmd_add(server: str, token: str, author: str, args: argparse.Namespace) -> int:
+    if not args.date or not args.note:
+        eprint("[error] adding an event needs --date and --note")
+        return 1
+    body: dict[str, Any] = {
+        "date": parse_date_arg("--date", args.date),
+        "title": clean_note(args.note),
+        "author": author,
+    }
+    if args.id:
+        body["id"] = args.id
+
+    status, payload = request_json("POST", f"{server}/api/v1/calendar/event", token, body)
+    if status == 201:
+        print(f"[ok] added {payload['id']} {payload['date']} {payload['title']!r} by {payload['author']}")
+        return 0
+    if status == 200:
+        verb = "updated" if args.id else "already exists"
+        print(f"[ok] {verb} {payload['id']} {payload['date']} {payload['title']!r} by {payload['author']}")
+        return 0
+    explain_failure(status, payload)
+    return 1
+
+
+def cmd_delete(server: str, token: str, event_id: str) -> int:
+    if not EVENT_ID_PATTERN.match(event_id):
+        eprint("[error] --delete takes an 8-character hex event id (see --list)")
+        return 1
+    status, payload = request_json("DELETE", f"{server}/api/v1/calendar/event/{event_id}", token)
+    if status == 200:
+        print(f"[ok] deleted {event_id}")
+        return 0
+    explain_failure(status, payload)
+    return 1
+
+
+def cmd_list(server: str, token: str, args: argparse.Namespace) -> int:
+    start = parse_date_arg("--from", args.date_from) if args.date_from else date.today().isoformat()
+    end = (
+        parse_date_arg("--to", args.date_to)
+        if args.date_to
+        else (date.fromisoformat(start) + timedelta(days=60)).isoformat()
+    )
+    status, payload = request_json(
+        "GET", f"{server}/api/v1/calendar/events?start={start}&end={end}", token
+    )
+    if status != 200:
+        explain_failure(status, payload)
+        return 1
+    events = payload.get("events", [])
+    if not events:
+        print(f"[ok] no events {start}..{end}")
+        return 0
+    for event in events:
+        print(f"{event['id']}  {event['date']}  {event['author']}  {event['title']}")
+    print(f"[ok] {len(events)} event(s) {start}..{end}")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="push_event", description="Add, update, list or delete DotHeart calendar events."
+    )
+    parser.add_argument("--date", help="event date, YYYY-MM-DD")
+    parser.add_argument("--note", help=f"event title, up to {MAX_TITLE_LENGTH} chars")
+    parser.add_argument("--author", choices=("a", "b"), help="who is adding it (default: $DOTHEART_AUTHOR or a)")
+    parser.add_argument("--id", help="update the existing event with this 8-hex-char id")
+    parser.add_argument("--delete", metavar="ID", help="delete the event with this id")
+    parser.add_argument("--list", action="store_true", help="list upcoming events")
+    parser.add_argument("--from", dest="date_from", help="--list start date (default: today)")
+    parser.add_argument("--to", dest="date_to", help="--list end date (default: today + 60 days)")
+    return parser
+
+
+def main(argv: list[str]) -> int:
+    args = build_parser().parse_args(argv)
+    server, token, env_author = load_config()
+    author = args.author or env_author
+    if author not in ("a", "b"):
+        eprint(f"[error] author must be 'a' or 'b', got {author!r}")
+        return 1
+
+    if args.list:
+        return cmd_list(server, token, args)
+    if args.delete:
+        return cmd_delete(server, token, args.delete)
+    return cmd_add(server, token, author, args)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

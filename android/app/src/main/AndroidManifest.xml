@@ -37,6 +37,22 @@
                 android:resource="@xml/couple_widget_info" />
         </receiver>
 
+        <!-- Alternative 4x2 widget: shared calendar strip. Shares the sync
+             worker with CoupleWidgetProvider; its cycle-tap action is
+             delivered by an explicit PendingIntent, so only the standard
+             update action needs an intent filter. -->
+        <receiver
+            android:name=".CalendarWidgetProvider"
+            android:exported="true"
+            android:label="@string/calendar_widget_label">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/calendar_widget_info" />
+        </receiver>
+
     </application>
 
 </manifest>

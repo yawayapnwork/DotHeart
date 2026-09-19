@@ -3,11 +3,13 @@ package com.dotheart.widget.net
 import android.util.Log
 import com.dotheart.widget.util.BatteryStatus
 import java.io.IOException
+import java.time.LocalDate
 import kotlinx.coroutines.delay
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONException
 import org.json.JSONObject
 
 sealed class StateFetchResult {
@@ -161,6 +163,57 @@ class WidgetRepository(private val baseUrl: String, private val pingToken: Strin
         } catch (e: IOException) {
             Log.w(TAG, "sendPing exhausted retries.", e)
             PingResult.Failed(retryable = true, reason = e.message ?: "Network error")
+        }
+    }
+
+    /**
+     * GET /api/v1/calendar/events for [start]..[end] inclusive (local dates;
+     * the backend defaults to its own UTC "today", so the client always
+     * passes explicit bounds). Authenticated with the same bearer token as
+     * the ping.
+     */
+    suspend fun fetchCalendarEvents(start: LocalDate, end: LocalDate): CalendarFetchResult {
+        if (pingToken.isBlank()) {
+            return CalendarFetchResult.Failed(retryable = false, reason = "Token not configured.")
+        }
+        return try {
+            withRetry {
+                val url = "$baseUrl/api/v1/calendar/events".toHttpUrl().newBuilder()
+                    .addQueryParameter("start", start.toString())
+                    .addQueryParameter("end", end.toString())
+                    .build()
+                val request = Request.Builder()
+                    .url(url)
+                    .header("Authorization", "Bearer $pingToken")
+                    .get()
+                    .build()
+
+                client.newCall(request).execute().use { response ->
+                    when {
+                        response.isSuccessful -> parseCalendarBody(response.body?.string())
+                        response.code in RETRYABLE_HTTP_CODES ->
+                            CalendarFetchResult.Failed(retryable = true, reason = "HTTP ${response.code}")
+                        else ->
+                            CalendarFetchResult.Failed(retryable = false, reason = "HTTP ${response.code}")
+                    }
+                }
+            }
+        } catch (e: IOException) {
+            Log.w(TAG, "fetchCalendarEvents exhausted retries.", e)
+            CalendarFetchResult.Failed(retryable = true, reason = e.message ?: "Network error")
+        }
+    }
+
+    private fun parseCalendarBody(body: String?): CalendarFetchResult {
+        if (body.isNullOrEmpty()) {
+            return CalendarFetchResult.Failed(retryable = true, reason = "Empty response body.")
+        }
+        return try {
+            CalendarFetchResult.Success(
+                CalendarEvent.fromJsonArray(JSONObject(body).optJSONArray("events"))
+            )
+        } catch (e: JSONException) {
+            CalendarFetchResult.Failed(retryable = true, reason = "Malformed response body.")
         }
     }
 

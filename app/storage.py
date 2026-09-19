@@ -8,6 +8,9 @@ Two independent single-row tables:
                   startup (id=1 row created unconditionally) so /ping works
                   even before any art has ever been pushed.
 
+Shared-calendar events live apart from SQLite in calendar_events.json
+(see CalendarStorage), replaced atomically on every change.
+
 Image bytes live on disk as a file whose name is derived from its sniffed
 format. All writes (file and DB) are performed so that a concurrent reader
 never observes a half-written file or an inconsistent (filename, checksum)
@@ -16,13 +19,16 @@ pair.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import sqlite3
 import tempfile
 import threading
 import time
+import uuid
 from dataclasses import dataclass
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -326,3 +332,142 @@ class WidgetStorage:
             except OSError:
                 pass
             raise
+
+
+CALENDAR_FILENAME = "calendar_events.json"
+MAX_CALENDAR_EVENTS = 200
+# Events older than this many days are dropped on the next write, so the
+# file stays small without any separate cleanup job.
+CALENDAR_RETENTION_DAYS = 90
+
+
+class CalendarFullError(Exception):
+    """Raised when adding an event would exceed MAX_CALENDAR_EVENTS."""
+
+
+class CalendarStorage:
+    """Shared two-person calendar persisted as one small JSON document:
+
+        {"version": 1, "events": [
+            {"id": "3fa9c2d1", "date": "2026-09-25", "title": "visiting",
+             "author": "a", "updated_at": 1789791286}, ...]}
+
+    Every mutation is load -> modify -> atomic replace under one lock, using
+    the same temp-file + fsync + os.replace routine as the image writes, so
+    a reader (or a crash mid-write) never sees a half-written file. Reads
+    take the lock too; the file is tiny (<= MAX_CALENDAR_EVENTS entries).
+    """
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+        self._lock = threading.RLock()
+
+    # -- internals --------------------------------------------------------
+
+    def _load(self) -> List[Dict[str, Any]]:
+        try:
+            raw = self._path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return []
+        try:
+            events = json.loads(raw)["events"]
+            if not isinstance(events, list) or not all(isinstance(e, dict) for e in events):
+                raise ValueError("events is not a list of objects")
+            return events
+        except (ValueError, KeyError, TypeError):
+            # Never crash the API over a damaged file, and never silently
+            # overwrite it either: move it aside for inspection and start
+            # from an empty calendar.
+            aside = self._path.with_name(f"{self._path.name}.corrupt-{int(time.time())}")
+            logger.error("Corrupt calendar file; moving to %s", aside, exc_info=True)
+            try:
+                os.replace(self._path, aside)
+            except OSError:
+                logger.warning("Could not move corrupt calendar file aside.", exc_info=True)
+            return []
+
+    def _save(self, events: List[Dict[str, Any]]) -> None:
+        payload = json.dumps({"version": 1, "events": events}, ensure_ascii=False, indent=1)
+        WidgetStorage._atomic_write(self._path, payload.encode("utf-8"))
+
+    @staticmethod
+    def _sort_key(event: Dict[str, Any]) -> tuple:
+        return (event["date"], event["title"], event["id"])
+
+    # -- public API -------------------------------------------------------
+
+    def upsert_event(
+        self,
+        event_date: str,
+        title: str,
+        author: str,
+        event_id: Optional[str] = None,
+    ) -> tuple:
+        """Adds an event, or updates the one named by [event_id]. Returns
+        (event, created).
+
+        Adding an event identical (date, title, author) to an existing one
+        returns that event unchanged instead of a duplicate, so a retried
+        CLI call is harmless. Raises KeyError if [event_id] names no event,
+        ValueError for an invalid date or author, CalendarFullError at the
+        capacity limit.
+        """
+        if author not in VALID_USER_IDS:
+            raise ValueError(f"Invalid author: {author!r}")
+        date.fromisoformat(event_date)  # ValueError on e.g. 2026-02-31
+        now = int(time.time())
+
+        with self._lock:
+            events = self._load()
+
+            if event_id is not None:
+                for event in events:
+                    if event["id"] == event_id:
+                        event.update(date=event_date, title=title, author=author, updated_at=now)
+                        events.sort(key=self._sort_key)
+                        self._save(events)
+                        return event, False
+                raise KeyError(event_id)
+
+            for event in events:
+                if (event["date"], event["title"], event["author"]) == (event_date, title, author):
+                    return event, False
+
+            cutoff = (date.today() - timedelta(days=CALENDAR_RETENTION_DAYS)).isoformat()
+            events = [e for e in events if e["date"] >= cutoff]
+            if len(events) >= MAX_CALENDAR_EVENTS:
+                raise CalendarFullError(f"Calendar is full ({MAX_CALENDAR_EVENTS} events).")
+
+            existing_ids = {e["id"] for e in events}
+            new_id = uuid.uuid4().hex[:8]
+            while new_id in existing_ids:
+                new_id = uuid.uuid4().hex[:8]
+
+            event = {
+                "id": new_id,
+                "date": event_date,
+                "title": title,
+                "author": author,
+                "updated_at": now,
+            }
+            events.append(event)
+            events.sort(key=self._sort_key)
+            self._save(events)
+            return event, True
+
+    def delete_event(self, event_id: str) -> bool:
+        """True if an event was removed, False if no event had that id."""
+        with self._lock:
+            events = self._load()
+            remaining = [e for e in events if e["id"] != event_id]
+            if len(remaining) == len(events):
+                return False
+            self._save(remaining)
+            return True
+
+    def list_events(self, start: date, end: date) -> List[Dict[str, Any]]:
+        """Events with start <= date <= end (inclusive), sorted by date."""
+        lo, hi = start.isoformat(), end.isoformat()
+        with self._lock:
+            events = self._load()
+        return sorted((e for e in events if lo <= e["date"] <= hi), key=self._sort_key)

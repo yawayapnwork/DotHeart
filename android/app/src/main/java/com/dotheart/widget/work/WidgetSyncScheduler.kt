@@ -1,6 +1,8 @@
 package com.dotheart.widget.work
 
 import android.content.Context
+import com.dotheart.widget.CalendarWidgetProvider
+import com.dotheart.widget.CoupleWidgetProvider
 import androidx.work.BackoffPolicy
 import androidx.work.Constraints
 import androidx.work.ExistingPeriodicWorkPolicy
@@ -75,6 +77,19 @@ object WidgetSyncScheduler {
 
     fun cancel(context: Context) {
         WorkManager.getInstance(context).cancelUniqueWork(PERIODIC_WORK_NAME)
+    }
+
+    /**
+     * Cancels the periodic job only if NO widget of either kind (couple or
+     * calendar) is still placed. Both providers share this one job, so
+     * removing the last widget of one kind must not stop syncing for the
+     * other.
+     */
+    fun cancelIfUnused(context: Context) {
+        if (CoupleWidgetProvider.hasInstances(context) || CalendarWidgetProvider.hasInstances(context)) {
+            return
+        }
+        cancel(context)
     }
 
     const val INPUT_KEY_SEND_PING = "send_ping"
