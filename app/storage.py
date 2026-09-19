@@ -3,6 +3,7 @@
 Two independent single-row tables:
   widget_state -- the current art + note (absent until the first push;
                   GET /api/v1/widget/current 404s until then).
+  note_history -- rolling log of the last MAX_NOTE_HISTORY pushed notes.
   ping_state   -- last-ping timestamps for both users, always present from
                   startup (id=1 row created unconditionally) so /ping works
                   even before any art has ever been pushed.
@@ -23,7 +24,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("dotheart.storage")
 
@@ -45,7 +46,16 @@ CREATE TABLE IF NOT EXISTS ping_state (
     battery_level_b INTEGER NOT NULL DEFAULT -1,
     is_charging_b INTEGER NOT NULL DEFAULT 0
 );
+
+CREATE TABLE IF NOT EXISTS note_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    message TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
 """
+
+# Rolling window of pushed notes kept in note_history (newest survive).
+MAX_NOTE_HISTORY = 5
 
 # Columns added after the first release; applied to pre-existing databases
 # by WidgetStorage._migrate_ping_state (CREATE TABLE IF NOT EXISTS above is a
@@ -112,6 +122,13 @@ class WidgetStorage:
             # single statement per call.
             self._conn.executescript(_SCHEMA)
             self._migrate_ping_state()
+            # Databases created before note_history existed: seed the log
+            # with the single note they already hold, once.
+            self._conn.execute(
+                "INSERT INTO note_history (message, created_at) "
+                "SELECT message, last_art_updated_at FROM widget_state "
+                "WHERE NOT EXISTS (SELECT 1 FROM note_history)"
+            )
             self._conn.execute(
                 "INSERT OR IGNORE INTO ping_state (id, last_ping_a, last_ping_b) "
                 "VALUES (1, 0, 0)"
@@ -234,6 +251,17 @@ class WidgetStorage:
                     """,
                     (message, filename, checksum, last_art_updated_at),
                 )
+                # Same transaction as the state upsert: the log and the
+                # current note can never disagree. Prune to the newest N.
+                self._conn.execute(
+                    "INSERT INTO note_history (message, created_at) VALUES (?, ?)",
+                    (message, last_art_updated_at),
+                )
+                self._conn.execute(
+                    "DELETE FROM note_history WHERE id NOT IN "
+                    "(SELECT id FROM note_history ORDER BY id DESC LIMIT ?)",
+                    (MAX_NOTE_HISTORY,),
+                )
 
             if previous is not None and previous.image_filename != filename:
                 stale_path = self._image_dir / previous.image_filename
@@ -251,6 +279,16 @@ class WidgetStorage:
             checksum=checksum,
             last_art_updated_at=last_art_updated_at,
         )
+
+    def get_recent_notes(self, limit: int = MAX_NOTE_HISTORY) -> List[Dict[str, Any]]:
+        """The last `limit` pushed notes, newest first, as
+        [{"message": str, "timestamp": int}, ...]."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT message, created_at FROM note_history ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [{"message": row[0], "timestamp": row[1]} for row in rows]
 
     def image_path_for(self, filename: str) -> Optional[Path]:
         """Resolve a requested filename to a path, only if it is the

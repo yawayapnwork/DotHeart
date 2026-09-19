@@ -1,8 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Brutalist telemetry layout: pure black, zero corner radius, zero
-     decorative frames/scrims. RemoteViews-safe: only FrameLayout/ImageView/
-     TextView are used, all on the AppWidget host's supported-view
-     allowlist. -->
+     decorative frames/scrims. RemoteViews-safe: only FrameLayout/
+     LinearLayout/ImageView/TextView are used, all on the AppWidget host's
+     supported-view allowlist.
+
+     Two mutually exclusive bodies share the space above the status bar:
+       iv_pixel_art   - the sprite canvas (default mode "CANVAS")
+       ll_log_history - a 3-line terminal log of the latest notes (mode "LOG")
+     CoupleWidgetProvider.render() flips their visibility; the status bar
+     stays visible in both modes and is the tap target that toggles them. -->
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/widget_root"
     android:layout_width="match_parent"
@@ -10,29 +16,78 @@
     android:background="@color/widget_bg">
 
     <ImageView
-        android:id="@+id/widget_image"
+        android:id="@+id/iv_pixel_art"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
         android:layout_marginTop="6dp"
-        android:layout_marginBottom="22dp"
+        android:layout_marginBottom="30dp"
         android:layout_marginStart="6dp"
         android:layout_marginEnd="6dp"
         android:scaleType="centerInside"
         android:contentDescription="@string/widget_image_description" />
 
+    <!-- Terminal log: up to three "> note" lines, oldest on top, newest at
+         the bottom. Hidden (GONE) in CANVAS mode. Lines are single-line,
+         ellipsized, monospace, white on the root's flat black. -->
+    <LinearLayout
+        android:id="@+id/ll_log_history"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:layout_marginTop="6dp"
+        android:layout_marginBottom="30dp"
+        android:layout_marginStart="6dp"
+        android:layout_marginEnd="6dp"
+        android:gravity="center_vertical"
+        android:orientation="vertical"
+        android:visibility="gone">
+
+        <TextView
+            android:id="@+id/tv_log_line_1"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:singleLine="true"
+            android:ellipsize="end"
+            android:fontFamily="monospace"
+            android:textColor="@color/widget_fg"
+            android:textSize="13sp" />
+
+        <TextView
+            android:id="@+id/tv_log_line_2"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:singleLine="true"
+            android:ellipsize="end"
+            android:fontFamily="monospace"
+            android:textColor="@color/widget_fg"
+            android:textSize="13sp" />
+
+        <TextView
+            android:id="@+id/tv_log_line_3"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:singleLine="true"
+            android:ellipsize="end"
+            android:fontFamily="monospace"
+            android:textColor="@color/widget_fg"
+            android:textSize="13sp" />
+    </LinearLayout>
+
     <!-- Single-line monospace telemetry readout, e.g.
-         "[SYNC 14M AGO // LINK 200] > out for milk" - no background, no
-         scrim, no rounded corners; text sits directly on the root's flat
-         black. -->
+         "PEER 84% [CHRG] // SYNC 14m AGO // LINK 200 > out for milk" - no
+         background, no scrim, no rounded corners; text sits directly on the
+         root's flat black. Tapping it toggles CANVAS/LOG, so it carries
+         extra vertical padding for a usable touch target. -->
     <TextView
         android:id="@+id/widget_status"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_gravity="bottom"
         android:paddingStart="4dp"
-        android:paddingEnd="10dp"
-        android:paddingTop="2dp"
-        android:paddingBottom="2dp"
+        android:paddingEnd="14dp"
+        android:paddingTop="7dp"
+        android:paddingBottom="7dp"
         android:singleLine="true"
         android:ellipsize="end"
         android:fontFamily="monospace"
@@ -52,7 +107,7 @@
         android:layout_height="7dp"
         android:layout_gravity="bottom|end"
         android:layout_marginEnd="2dp"
-        android:layout_marginBottom="3dp"
+        android:layout_marginBottom="10dp"
         android:src="@drawable/indicator_square"
         android:contentDescription="@string/widget_link_description" />
 

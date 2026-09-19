@@ -4,6 +4,10 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.util.Log
+import com.dotheart.widget.net.WidgetNote
+import org.json.JSONArray
+import org.json.JSONException
+import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
@@ -57,6 +61,43 @@ class WidgetStateStore(context: Context) {
 
     fun readPeerIsCharging(): Boolean = prefs.getBoolean(KEY_PEER_IS_CHARGING, false)
 
+    /**
+     * Cached note log, newest first, exactly as the backend returned it
+     * (at most 5). Empty if none has synced yet or the stored JSON is corrupt.
+     */
+    fun readNotes(): List<WidgetNote> {
+        val raw = prefs.getString(KEY_NOTES, null) ?: return emptyList()
+        return try {
+            val array = JSONArray(raw)
+            (0 until array.length()).mapNotNull { i ->
+                array.optJSONObject(i)?.let {
+                    WidgetNote(it.optString("message", ""), it.optLong("timestamp", 0L))
+                }
+            }
+        } catch (e: JSONException) {
+            Log.w(TAG, "Discarding corrupt cached notes.", e)
+            emptyList()
+        }
+    }
+
+    /** Current display mode: DISPLAY_MODE_CANVAS (default) or DISPLAY_MODE_LOG. */
+    fun readDisplayMode(): String =
+        prefs.getString(KEY_DISPLAY_MODE, DISPLAY_MODE_CANVAS) ?: DISPLAY_MODE_CANVAS
+
+    /** Flips CANVAS <-> LOG and returns the new mode. */
+    fun toggleDisplayMode(): String {
+        val next = if (readDisplayMode() == DISPLAY_MODE_LOG) DISPLAY_MODE_CANVAS else DISPLAY_MODE_LOG
+        prefs.edit().putString(KEY_DISPLAY_MODE, next).apply()
+        return next
+    }
+
+    /** Epoch millis of the previous widget-body tap, for double-tap detection. */
+    fun readLastTapMillis(): Long = prefs.getLong(KEY_LAST_TAP_MS, 0L)
+
+    fun writeLastTapMillis(millis: Long) {
+        prefs.edit().putLong(KEY_LAST_TAP_MS, millis).apply()
+    }
+
     fun writeState(
         message: String,
         checksum: String,
@@ -64,7 +105,8 @@ class WidgetStateStore(context: Context) {
         lastPingA: Long,
         lastPingB: Long,
         peerBatteryLevel: Int,
-        peerIsCharging: Boolean
+        peerIsCharging: Boolean,
+        notes: List<WidgetNote>
     ) {
         prefs.edit()
             .putString(KEY_MESSAGE, message)
@@ -74,7 +116,16 @@ class WidgetStateStore(context: Context) {
             .putLong(KEY_LAST_PING_B, lastPingB)
             .putInt(KEY_PEER_BATTERY_LEVEL, peerBatteryLevel)
             .putBoolean(KEY_PEER_IS_CHARGING, peerIsCharging)
+            .putString(KEY_NOTES, notesToJson(notes))
             .apply()
+    }
+
+    private fun notesToJson(notes: List<WidgetNote>): String {
+        val array = JSONArray()
+        for (note in notes) {
+            array.put(JSONObject().put("message", note.message).put("timestamp", note.timestamp))
+        }
+        return array.toString()
     }
 
     fun saveBitmapToCache(bitmap: Bitmap) {
@@ -128,9 +179,15 @@ class WidgetStateStore(context: Context) {
         private const val KEY_LAST_PING_B = "last_ping_b"
         private const val KEY_PEER_BATTERY_LEVEL = "peer_battery_level"
         private const val KEY_PEER_IS_CHARGING = "peer_is_charging"
+        private const val KEY_NOTES = "notes"
+        private const val KEY_DISPLAY_MODE = "display_mode"
+        private const val KEY_LAST_TAP_MS = "last_tap_ms"
         private const val KEY_LINK_STATUS = "link_status"
         private const val KEY_FAILURE_COUNT = "failure_count"
         private const val KEY_ALERT_SENT = "failure_alert_sent"
+
+        const val DISPLAY_MODE_CANVAS = "CANVAS"
+        const val DISPLAY_MODE_LOG = "LOG"
 
         const val LINK_STATUS_UNKNOWN = 0
         const val LINK_STATUS_UNREACHABLE = -1

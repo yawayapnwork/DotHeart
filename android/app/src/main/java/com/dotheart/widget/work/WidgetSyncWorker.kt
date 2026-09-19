@@ -178,7 +178,8 @@ class WidgetSyncWorker(
             lastPingA = state.lastPingA,
             lastPingB = state.lastPingB,
             peerBatteryLevel = state.peerBatteryLevel,
-            peerIsCharging = state.peerIsCharging
+            peerIsCharging = state.peerIsCharging,
+            notes = state.notes
         )
         stateStore.writeLinkStatus(200)
         stateStore.resetFailureCount()

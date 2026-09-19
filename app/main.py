@@ -223,6 +223,7 @@ async def get_current_widget(user_id: str | None = Query(default=None)) -> JSONR
             "last_ping_b": ping.last_ping_b,
             "peer_battery_level": peer_level,
             "peer_is_charging": peer_charging,
+            "notes": storage.get_recent_notes(),
         },
     )
 

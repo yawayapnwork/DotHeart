@@ -1,5 +1,6 @@
 package com.dotheart.widget.net
 
+import org.json.JSONArray
 import org.json.JSONObject
 
 /**
@@ -7,7 +8,8 @@ import org.json.JSONObject
  * (see app/main.py::get_current_widget in the FastAPI service):
  *   { "message": str, "image_url": str, "timestamp": int, "checksum": str,
  *     "last_ping_a": int, "last_ping_b": int,
- *     "peer_battery_level": int|null, "peer_is_charging": bool|null }
+ *     "peer_battery_level": int|null, "peer_is_charging": bool|null,
+ *     "notes": [ { "message": str, "timestamp": int }, ... ] }  (newest first)
  *
  * last_ping_a/last_ping_b are Unix epoch seconds, 0 if that user has never
  * pinged (see app/storage.py::PingState - the ping_state row always exists
@@ -21,6 +23,9 @@ import org.json.JSONObject
  * JSON library dependency (Gson/Moshi) - the schema is small and stable, and
  * every byte here counts against the <15MB APK budget.
  */
+/** One entry of the backend's rolling note log. */
+data class WidgetNote(val message: String, val timestamp: Long)
+
 data class WidgetState(
     val message: String,
     val imageUrl: String,
@@ -29,7 +34,8 @@ data class WidgetState(
     val lastPingA: Long,
     val lastPingB: Long,
     val peerBatteryLevel: Int = PEER_BATTERY_UNKNOWN,
-    val peerIsCharging: Boolean = false
+    val peerIsCharging: Boolean = false,
+    val notes: List<WidgetNote> = emptyList()
 ) {
     companion object {
         const val PEER_BATTERY_UNKNOWN = -1
@@ -47,8 +53,19 @@ data class WidgetState(
                 lastPingA = json.optLong("last_ping_a", 0L),
                 lastPingB = json.optLong("last_ping_b", 0L),
                 peerBatteryLevel = json.optInt("peer_battery_level", PEER_BATTERY_UNKNOWN),
-                peerIsCharging = json.optBoolean("peer_is_charging", false)
+                peerIsCharging = json.optBoolean("peer_is_charging", false),
+                notes = parseNotes(json.optJSONArray("notes"))
             )
+        }
+
+        private fun parseNotes(array: JSONArray?): List<WidgetNote> {
+            if (array == null) return emptyList()
+            val notes = ArrayList<WidgetNote>(array.length())
+            for (i in 0 until array.length()) {
+                val item = array.optJSONObject(i) ?: continue
+                notes.add(WidgetNote(item.optString("message", ""), item.optLong("timestamp", 0L)))
+            }
+            return notes
         }
     }
 }
