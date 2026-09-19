@@ -344,6 +344,13 @@ class CoupleWidgetProvider : AppWidgetProvider() {
             signal: Signal,
             nightStamp: String?
         ): String {
+            // Stale-state guard: after a self-healing failure (cold start,
+            // timeout, 5xx) the art stays as last rendered - only the ticker
+            // changes. Exact line, nothing appended.
+            if (!showSyncing && store.isLinkRetrying()) {
+                return "PEER ??% // [RETRYING LINK...]"
+            }
+
             val header = if (showSyncing) {
                 "[SYNCING...]"
             } else {

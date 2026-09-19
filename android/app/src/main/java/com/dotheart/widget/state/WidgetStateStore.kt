@@ -52,6 +52,19 @@ class WidgetStateStore(context: Context) {
      */
     fun readLinkStatus(): Int = prefs.getInt(KEY_LINK_STATUS, LINK_STATUS_UNKNOWN)
 
+    /**
+     * True while the most recent sync failed in a way that is expected to
+     * heal by itself: no response at all (timeout / cold start / offline),
+     * a 5xx gateway or server error, or 429. The widget then keeps the last
+     * bitmap on screen and shows "[RETRYING LINK...]" instead of an error.
+     * Permanent failures (e.g. 401/404) are not "retrying" and keep showing
+     * their real LINK code.
+     */
+    fun isLinkRetrying(): Boolean {
+        val status = readLinkStatus()
+        return status == LINK_STATUS_UNREACHABLE || status in 500..599 || status == 429
+    }
+
     fun writeLinkStatus(statusCode: Int) {
         prefs.edit().putInt(KEY_LINK_STATUS, statusCode).apply()
     }

@@ -198,6 +198,10 @@ class WidgetSyncWorker(
 
     private fun handleFailure(retryable: Boolean, reason: String, httpCode: Int?): Result {
         Log.w(TAG, "Widget sync failure (retryable=$retryable, httpCode=$httpCode): $reason")
+        // Stale-state guard: a failed sync (e.g. a Render cold start) touches
+        // only the link status. The cached bitmap, message and notes are left
+        // exactly as they were, and the redraw below just swaps the ticker to
+        // "PEER ??% // [RETRYING LINK...]" (see WidgetStateStore.isLinkRetrying).
         stateStore.writeLinkStatus(httpCode ?: WidgetStateStore.LINK_STATUS_UNREACHABLE)
         CoupleWidgetProvider.refreshAllWidgets(applicationContext)
 

@@ -9,7 +9,6 @@ import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
-import androidx.work.WorkRequest
 import androidx.work.workDataOf
 import java.util.concurrent.TimeUnit
 
@@ -36,6 +35,14 @@ object WidgetSyncScheduler {
     const val SYNC_WORK_TAG = "dotheart_sync"
     private const val REFRESH_INTERVAL_MINUTES = 30L
 
+    /**
+     * Base delay for WorkManager's exponential backoff after a transient
+     * failure (Result.retry()): 30s, 60s, 120s, ... capped by WorkManager
+     * at 5 hours. Long enough for a Render free-tier container to finish
+     * booting between attempts, short enough that a blip self-heals quickly.
+     */
+    private const val BACKOFF_DELAY_SECONDS = 30L
+
     fun schedule(context: Context) {
         val constraints = Constraints.Builder()
             .setRequiredNetworkType(NetworkType.CONNECTED)
@@ -48,17 +55,20 @@ object WidgetSyncScheduler {
             .setConstraints(constraints)
             .setBackoffCriteria(
                 BackoffPolicy.EXPONENTIAL,
-                WorkRequest.MIN_BACKOFF_MILLIS,
-                TimeUnit.MILLISECONDS
+                BACKOFF_DELAY_SECONDS,
+                TimeUnit.SECONDS
             )
             .addTag(SYNC_WORK_TAG)
             .build()
 
-        // KEEP: re-entry from either caller above must not reset
-        // accumulated backoff state or enqueue a duplicate periodic job.
+        // UPDATE (not KEEP): installs that already have the periodic job
+        // registered with the old 10s backoff pick up the new criteria on
+        // the next process start. Like KEEP, re-entry from either caller
+        // above is idempotent - it never enqueues a duplicate - and UPDATE
+        // preserves the job's existing schedule/period timing.
         WorkManager.getInstance(context).enqueueUniquePeriodicWork(
             PERIODIC_WORK_NAME,
-            ExistingPeriodicWorkPolicy.KEEP,
+            ExistingPeriodicWorkPolicy.UPDATE,
             request
         )
     }
@@ -84,6 +94,7 @@ object WidgetSyncScheduler {
         // 15-20s OkHttp timeouts) rather than sit deferred indefinitely if
         // the system's cached network-available signal is stale.
         val request = OneTimeWorkRequestBuilder<WidgetSyncWorker>()
+            .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, BACKOFF_DELAY_SECONDS, TimeUnit.SECONDS)
             .addTag(SYNC_WORK_TAG)
             .setInputData(workDataOf(INPUT_KEY_SEND_PING to sendPing))
             .build()
