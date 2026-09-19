@@ -22,6 +22,7 @@ import com.dotheart.widget.net.WidgetRepository
 import com.dotheart.widget.render.PixelArtRenderer
 import com.dotheart.widget.state.WidgetStateStore
 import com.dotheart.widget.util.BatteryReader
+import com.dotheart.widget.util.HapticFeedback
 import com.dotheart.widget.util.NotificationChannels
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -185,6 +186,13 @@ class WidgetSyncWorker(
         stateStore.resetFailureCount()
 
         CoupleWidgetProvider.refreshAllWidgets(applicationContext)
+
+        // Hook point: only a genuinely new payload buzzes - checksum differs
+        // from the one cached before this sync. Skipped when the low-battery
+        // path bypassed the art fetch (the art did not actually arrive).
+        if (!skipGraphics && state.checksum != knownChecksum) {
+            HapticFeedback.play(applicationContext, HapticFeedback.Signature.PAYLOAD_RECEIVED)
+        }
         return Result.success()
     }
 

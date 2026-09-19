@@ -14,6 +14,7 @@ import android.widget.RemoteViews
 import com.dotheart.widget.render.PixelArtRenderer
 import com.dotheart.widget.state.WidgetStateStore
 import com.dotheart.widget.util.BatteryReader
+import com.dotheart.widget.util.HapticFeedback
 import com.dotheart.widget.util.RelativeTime
 import com.dotheart.widget.work.WidgetSyncScheduler
 import java.util.Calendar
@@ -90,6 +91,10 @@ class CoupleWidgetProvider : AppWidgetProvider() {
             return
         }
         tapStore.writeLastTapMillis(tapNow)
+
+        // Hook point: acknowledge the tap physically, before any render or
+        // work request. One non-blocking binder call.
+        HapticFeedback.play(context, HapticFeedback.Signature.PING_ACK)
 
         // onReceive runs on the main thread with a strict OS-enforced
         // execution budget - it must never perform network I/O itself. It

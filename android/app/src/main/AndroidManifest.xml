@@ -3,6 +3,10 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- Normal-protection permission (granted at install, no runtime prompt):
+         short haptic ticks for tap-acknowledge and new-artwork arrival, see
+         util/HapticFeedback.kt. -->
+    <uses-permission android:name="android.permission.VIBRATE" />
     <!-- Used only for the "hasn't synced in a while" alert (WidgetSyncWorker).
          Required at runtime on API 33+; this app is sideloaded (not
          Play-distributed, see PLAN.md) and has no Activity to host an
