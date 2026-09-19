@@ -111,6 +111,66 @@ object PixelArtRenderer {
         }
     }
 
+    /** Night window is [NIGHT_START_HOUR]:00 (inclusive) to [NIGHT_END_HOUR]:00 (exclusive), local time. */
+    const val NIGHT_START_HOUR = 23
+    const val NIGHT_END_HOUR = 6
+
+    /** Luminance kept during the night window: a 40% reduction leaves 60%. */
+    private const val NIGHT_KEEP_PERCENT = 60
+
+    /** Amber phosphor primary #FFB000, as its green channel over full red. */
+    private const val AMBER_GREEN = 0xB0
+
+    /** True for local hours 23, 0, 1, 2, 3, 4, 5 (23:00 up to but excluding 06:00). */
+    fun isNightHour(hourOfDay: Int): Boolean =
+        hourOfDay >= NIGHT_START_HOUR || hourOfDay < NIGHT_END_HOUR
+
+    /**
+     * Returns a new bitmap of identical dimensions dimmed for the night
+     * window: every color channel scaled to 60% (a 40% luminance reduction).
+     * With [amber] the image is instead reduced to a monochrome amber
+     * phosphor look: the dimmed pixel's Rec.601 luma (0..255) becomes the
+     * intensity of #FFB000, so white maps to (luma, luma*0xB0/0xFF, 0) and
+     * the brightest possible output stays at or below #FFB000 scaled by 60%.
+     *
+     * Operates directly on the ARGB int array, per pixel, with no
+     * resampling or filtering, so it cannot soften edges. Because each
+     * output pixel depends only on the same input pixel, the result is
+     * identical whether it runs before or after nearest-neighbor upscaling
+     * ([decodeAndScale]); the widget applies it to the cached scaled bitmap
+     * at render time so the cache itself is never modified and daylight
+     * renders restore full brightness. Alpha is preserved and fully
+     * transparent pixels are skipped. [source] is untouched; the caller owns
+     * the returned bitmap.
+     */
+    fun applyNightDim(source: Bitmap, amber: Boolean): Bitmap {
+        val width = source.width
+        val height = source.height
+        val pixels = IntArray(width * height)
+        source.getPixels(pixels, 0, width, 0, 0, width, height)
+
+        for (i in pixels.indices) {
+            val argb = pixels[i]
+            val alpha = argb ushr 24
+            if (alpha == 0) continue
+
+            val r = (((argb shr 16) and 0xFF) * NIGHT_KEEP_PERCENT) / 100
+            val g = (((argb shr 8) and 0xFF) * NIGHT_KEEP_PERCENT) / 100
+            val b = ((argb and 0xFF) * NIGHT_KEEP_PERCENT) / 100
+
+            pixels[i] = if (amber) {
+                val luma = (77 * r + 150 * g + 29 * b) shr 8
+                (alpha shl 24) or (luma shl 16) or ((luma * AMBER_GREEN / 0xFF) shl 8)
+            } else {
+                (alpha shl 24) or (r shl 16) or (g shl 8) or b
+            }
+        }
+
+        val output = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        output.setPixels(pixels, 0, width, 0, 0, width, height)
+        return output
+    }
+
     /** 4x4 Bayer threshold matrix (values 0..15) for the 1-bit ordered dither. */
     private val BAYER_4X4 = intArrayOf(
         0, 8, 2, 10,

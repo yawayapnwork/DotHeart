@@ -16,6 +16,8 @@ import com.dotheart.widget.state.WidgetStateStore
 import com.dotheart.widget.util.BatteryReader
 import com.dotheart.widget.util.RelativeTime
 import com.dotheart.widget.work.WidgetSyncScheduler
+import java.util.Calendar
+import java.util.Locale
 import kotlin.math.abs
 
 /**
@@ -193,7 +195,20 @@ class CoupleWidgetProvider : AppWidgetProvider() {
             val store = WidgetStateStore(context)
             val views = RemoteViews(context.packageName, R.layout.widget_couple)
 
-            val signal = evaluateSignal(store, System.currentTimeMillis())
+            val nowMillis = System.currentTimeMillis()
+            val signal = evaluateSignal(store, nowMillis)
+            val localNow = Calendar.getInstance()
+            val night = PixelArtRenderer.isNightHour(localNow.get(Calendar.HOUR_OF_DAY))
+            val nightStamp: String? = if (night) {
+                String.format(
+                    Locale.ROOT,
+                    "%02d:%02d",
+                    localNow.get(Calendar.HOUR_OF_DAY),
+                    localNow.get(Calendar.MINUTE)
+                )
+            } else {
+                null
+            }
             val logMode = store.readDisplayMode() == WidgetStateStore.DISPLAY_MODE_LOG
             if (logMode) {
                 // LOG mode never touches the bitmap: no cache decode, no decay
@@ -206,12 +221,20 @@ class CoupleWidgetProvider : AppWidgetProvider() {
                 views.setViewVisibility(R.id.iv_pixel_art, View.VISIBLE)
                 val cachedBitmap: Bitmap? = store.loadCachedBitmap()
                 if (cachedBitmap != null) {
-                    // Below 15% local battery, skip the per-pixel decay pass and
-                    // show the cached art as-is: no extra CPU work on a dying phone.
-                    val shown = if (signal == Signal.DECAYED && !BatteryReader.isLow(context)) {
-                        PixelArtRenderer.applyDecay(cachedBitmap)
-                    } else {
-                        cachedBitmap
+                    // Per-pixel passes (night dim, then carrier-lost decay) run
+                    // on copies; the cached bitmap is never modified. Below 15%
+                    // local battery both are skipped and the cached art is shown
+                    // as-is: no extra CPU work on a dying phone.
+                    var shown = cachedBitmap
+                    if (!BatteryReader.isLow(context)) {
+                        if (night) {
+                            shown = PixelArtRenderer.applyNightDim(shown, BuildConfig.DOTHEART_NIGHT_AMBER)
+                        }
+                        if (signal == Signal.DECAYED) {
+                            val decayed = PixelArtRenderer.applyDecay(shown)
+                            if (shown !== cachedBitmap) shown.recycle()
+                            shown = decayed
+                        }
                     }
                     views.setImageViewBitmap(R.id.iv_pixel_art, shown)
                 } else {
@@ -224,7 +247,7 @@ class CoupleWidgetProvider : AppWidgetProvider() {
 
             views.setTextViewText(
                 R.id.widget_status,
-                buildStatusLine(store, showSyncing, signal)
+                buildStatusLine(store, showSyncing, signal, nightStamp)
             )
 
             val pingA = store.readLastPingA()
@@ -310,7 +333,12 @@ class CoupleWidgetProvider : AppWidgetProvider() {
          * or, mid-tap:
          *   [SYNCING...] > out for milk
          */
-        private fun buildStatusLine(store: WidgetStateStore, showSyncing: Boolean, signal: Signal): String {
+        private fun buildStatusLine(
+            store: WidgetStateStore,
+            showSyncing: Boolean,
+            signal: Signal,
+            nightStamp: String?
+        ): String {
             val header = if (showSyncing) {
                 "[SYNCING...]"
             } else {
@@ -322,11 +350,13 @@ class CoupleWidgetProvider : AppWidgetProvider() {
                     else -> status.toString()
                 }
                 val base = "PEER ${peerPowerReadout(store)} // SYNC $ago // LINK $link"
-                when (signal) {
+                val withSignal = when (signal) {
                     Signal.ACTIVE -> base
                     Signal.STALE -> "$base [SIGNAL WEAK]"
                     Signal.DECAYED -> "$base [CARRIER LOST]"
                 }
+                // Trailing night indicator, e.g. "... // 01:14 [NIGHT]".
+                if (nightStamp != null) "$withSignal // $nightStamp [NIGHT]" else withSignal
             }
 
             val message = store.readMessage()

@@ -55,6 +55,16 @@ android {
             "DOTHEART_LOCAL_USER_ID",
             "\"${project.findProperty("dotheartLocalUserId") ?: "a"}\""
         )
+
+        // Night-window (23:00-06:00) art rendering: false = plain 40%
+        // luminance reduction, true = monochrome amber phosphor (#FFB000)
+        // tint. Baked in like the user id above, since there is no
+        // settings UI:  ./gradlew assembleDebug -PdotheartNightAmber=true
+        buildConfigField(
+            "boolean",
+            "DOTHEART_NIGHT_AMBER",
+            (project.findProperty("dotheartNightAmber")?.toString()?.toBoolean() ?: false).toString()
+        )
     }
 
     buildFeatures {
