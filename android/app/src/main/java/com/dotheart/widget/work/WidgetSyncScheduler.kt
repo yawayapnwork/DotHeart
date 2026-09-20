@@ -48,7 +48,8 @@ object WidgetSyncScheduler {
     fun schedule(context: Context) {
         val constraints = Constraints.Builder()
             .setRequiredNetworkType(NetworkType.CONNECTED)
-            .setRequiresBatteryNotLow(true)
+            // false: widgets keep updating when battery drops below 20%.
+            .setRequiresBatteryNotLow(false)
             .build()
 
         val request = PeriodicWorkRequestBuilder<WidgetSyncWorker>(
@@ -63,14 +64,15 @@ object WidgetSyncScheduler {
             .addTag(SYNC_WORK_TAG)
             .build()
 
-        // UPDATE (not KEEP): installs that already have the periodic job
-        // registered with the old 10s backoff pick up the new criteria on
-        // the next process start. Like KEEP, re-entry from either caller
-        // above is idempotent - it never enqueues a duplicate - and UPDATE
-        // preserves the job's existing schedule/period timing.
+        // KEEP: every entry point (app start, widget placement, boot,
+        // package replace) may call this, and an already-registered job is
+        // left untouched so its period timing is never reset or thrashed.
+        // Trade-off: changed constraints/backoff here do NOT reach installs
+        // that already have the job; switch to UPDATE (or bump the work
+        // name) for a release that needs to change them.
         WorkManager.getInstance(context).enqueueUniquePeriodicWork(
             PERIODIC_WORK_NAME,
-            ExistingPeriodicWorkPolicy.UPDATE,
+            ExistingPeriodicWorkPolicy.KEEP,
             request
         )
     }
