@@ -44,6 +44,59 @@ object HttpClientProvider {
             .build()
     }
 
+    /** Outcome of [probe]; each failure kind maps to a different fix. */
+    sealed class ProbeResult {
+        /** Server answered; [code] is the HTTP status. */
+        data class Reachable(val code: Int) : ProbeResult()
+
+        /** The OS network security policy refused plain HTTP to this host. */
+        data class CleartextBlocked(val host: String) : ProbeResult()
+
+        /** Policy allowed it, but nothing answered in time. */
+        data class TimedOut(val phase: String) : ProbeResult()
+
+        /** Any other I/O failure (refused, DNS, TLS, reset). */
+        data class Failed(val error: IOException) : ProbeResult()
+    }
+
+    /**
+     * Connection test for the debug network security config. Issues one GET
+     * and reports whether it was blocked by cleartext policy, timed out, or
+     * failed otherwise. Uses a short-timeout derived client (sharing the
+     * pool) so a policy check does not wait out the cold-start timeouts.
+     * Blocking; call from a background thread.
+     *
+     * A cleartext block fails immediately with UnknownServiceException
+     * ("CLEARTEXT communication to X not permitted by network security
+     * policy") before any socket opens, so it is distinguishable from a
+     * timeout, which means the host was permitted but did not respond.
+     */
+    fun probe(url: String, timeoutSeconds: Long = 5): ProbeResult {
+        val probeClient = client.newBuilder()
+            .connectTimeout(timeoutSeconds, TimeUnit.SECONDS)
+            .readTimeout(timeoutSeconds, TimeUnit.SECONDS)
+            .callTimeout(timeoutSeconds * 2, TimeUnit.SECONDS)
+            .retryOnConnectionFailure(false)
+            .build()
+        val request = okhttp3.Request.Builder().url(url).get().build()
+        return try {
+            probeClient.newCall(request).execute().use { ProbeResult.Reachable(it.code) }
+        } catch (e: java.net.UnknownServiceException) {
+            if (e.message?.contains("CLEARTEXT", ignoreCase = true) == true) {
+                ProbeResult.CleartextBlocked(request.url.host)
+            } else {
+                ProbeResult.Failed(e)
+            }
+        } catch (e: java.net.SocketTimeoutException) {
+            ProbeResult.TimedOut("connect/read")
+        } catch (e: InterruptedIOException) {
+            // OkHttp's callTimeout surfaces as InterruptedIOException("timeout").
+            ProbeResult.TimedOut("call")
+        } catch (e: IOException) {
+            ProbeResult.Failed(e)
+        }
+    }
+
     /**
      * Application interceptor that retries a request up to [maxRetries]
      * extra times when the server answers 502, 503 or 504 (a proxy in front
